@@ -20,9 +20,6 @@
 // Using higher even multiples may help the same code work for other transmitters
 #define RFM_OOK_CHIPRATE (1024  * 2)
 
-// Notional clock rate of RFM69 module
-#define FXOSC 32000000
-
 #define SPI_BAUD_RATE (1000*1000)
 
 #endif

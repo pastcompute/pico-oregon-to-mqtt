@@ -1,3 +1,6 @@
+#ifndef POTM_SX1231_H_
+#define POTM_SX1231_H_
+
 #define SX1231_SPI_WRITE_MASK 0x80
 
 #define SX1231_REG_00_FIFO          0x00
@@ -71,3 +74,5 @@
 #define SX1231_OPMODE_MODE_RX       0b00010000
 
 #define SX1231_IRQFLAGS1_MODEREADY  0b10000000
+
+#endif

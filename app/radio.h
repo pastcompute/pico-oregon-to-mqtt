@@ -13,137 +13,153 @@
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wnarrowing"
-#include "pico/binary_info.h"
 
-
-//#include "config.h"
+#define RADIO_SPI_DEBUG printf
+//#define RADIO_SPI_DEBUG()
 
 // Instead of using an all-encompassing library such as RadioHead,
 // Just provide convenience wrappers and leverage Pico hardware SPI
 // Given this is a Pico-specific system, I haven't bothered abstracting the SPI
+// Also I havent  bothered making a generic API like what I did for SX1276 once before
+// This code is specifically optimised for performing OOK reception
 
-#include "rfm69.h"
+#include "sx1231.h"
 
 class RFM69Radio {
 private:
-    uint8_t pin_miso;
-    uint8_t pin_mosi;
-    uint8_t pin_sck;
-    uint8_t pin_cs;
-    uint8_t pin_irq;
-    uint8_t pin_rst;
+    uint8_t pin_miso_;
+    uint8_t pin_mosi_;
+    uint8_t pin_sck_;
+    uint8_t pin_cs_;
+    uint8_t pin_irq_;
+    uint8_t pin_rst_;
 
-    spi_inst_t* spi;
+    spi_inst_t* spi_;
 
-    volatile bool spiReadError;
-    bool initError;
+    volatile bool spiReadError_;
+    bool initError_;
 
-    uint8_t version;
+    uint8_t version_;
+    uint16_t chipRate_;
+    uint32_t frequency_;
 
 public:
+
+    // Notional clock rate of RFM69 module
+    enum { FXOSC = 32000000u };
+
     RFM69Radio()
     : 
-      pin_miso(13),
-      pin_mosi(14),
-      pin_sck(15),
-      pin_cs(16),
-      pin_irq(17),
-      pin_rst(18),
-      spiReadError(false),
-      initError(false),
-      version(-1)
+      pin_miso_(13),
+      pin_mosi_(14),
+      pin_sck_(15),
+      pin_cs_(16),
+      pin_irq_(17),
+      pin_rst_(18),
+      spiReadError_(false),
+      initError_(false),
+      version_(-1),
+      chipRate_(10),
+      frequency_(434000000)
     {}
 
+    // Ignored after begin()
     void setPins(uint8_t miso, uint8_t mosi, uint8_t sck, uint8_t cs, uint8_t irq, uint8_t rst) {
-      pin_miso = miso;
-      pin_mosi = mosi;
-      pin_sck = sck;
-      pin_cs = cs;
-      pin_irq = irq;
-      pin_rst = rst;
+      pin_miso_ = miso;
+      pin_mosi_ = mosi;
+      pin_sck_ = sck;
+      pin_cs_ = cs;
+      pin_irq_ = irq;
+      pin_rst_ = rst;
     }
 
-    bool bad() {
-      return initError;
+    // Ignored after begin()
+    void setChipRate(uint16_t chipRate) {
+      chipRate_ = chipRate;
+    }
+    void setFrequency(uint32_t frequency) {
+      frequency_ = frequency;
+    }
+
+    bool bad() const {
+      return initError_;
     }
     uint8_t getVersion() const {
-      return version;
+      return version_;
     }
 
     void begin(spi_inst_t* spiInst) {
       assert(spiInst);
-      spi = spiInst;
-      spi_init(spi, SPI_BAUD_RATE);
-      gpio_set_function(pin_miso, GPIO_FUNC_SPI);
-      gpio_set_function(pin_mosi, GPIO_FUNC_SPI);
-      gpio_set_function(pin_sck, GPIO_FUNC_SPI);
+      spi_ = spiInst;
+      spi_init(spi_, SPI_BAUD_RATE);
+      gpio_set_function(pin_miso_, GPIO_FUNC_SPI);
+      gpio_set_function(pin_mosi_, GPIO_FUNC_SPI);
+      gpio_set_function(pin_sck_, GPIO_FUNC_SPI);
 
-      gpio_init(pin_cs);
-      gpio_set_dir(pin_cs, GPIO_OUT);
-      gpio_put(pin_cs, 1);
+      gpio_init(pin_cs_);
+      gpio_set_dir(pin_cs_, GPIO_OUT);
+      gpio_put(pin_cs_, 1);
 
-      gpio_init(pin_rst);
-      gpio_set_dir(pin_rst, GPIO_OUT);
-      gpio_put(pin_rst, 0);
+      gpio_init(pin_rst_);
+      gpio_set_dir(pin_rst_, GPIO_OUT);
+      gpio_put(pin_rst_, 0);
 
       reset();
       init();
     }
 
     void reset() {
-      gpio_put(pin_rst, 1); sleep_ms(10);
-      gpio_put(pin_rst, 0); sleep_ms(10);
+      gpio_put(pin_rst_, 1); sleep_ms(10);
+      gpio_put(pin_rst_, 0); sleep_ms(10);
     }
 
     void spiSelect() {
       asm volatile("nop \n nop \n nop");
-      gpio_put(pin_cs, 0);
+      gpio_put(pin_cs_, 0);
       asm volatile("nop \n nop \n nop");      
     }
     void spiUnselect() {
       asm volatile("nop \n nop \n nop");
-      gpio_put(pin_cs, 1);
+      gpio_put(pin_cs_, 1);
       asm volatile("nop \n nop \n nop");      
     }
 
     void spiWriteReg(uint8_t addr, uint8_t value) {
-      printf("[W] *%02x := %02x\n", addr, value);
+      RADIO_SPI_DEBUG("[W] *%02x := %02x\n", addr, value);
       addr = addr | SX1231_SPI_WRITE_MASK;
       const uint8_t buf[2] = { addr, value };
-
       spiSelect();
-
-      sleep_ms(10);
-      spi_write_blocking(spi, buf, 2);
-      sleep_ms(10);
-
+      spi_write_blocking(spi_, buf, 2);
       spiUnselect();
     }
 
-    uint8_t spiReadReg(uint8_t addr) {
-
-      // FIXME: it should be possible to call this in a batch outside this
-      // But then I had noisy reads for some reason
+    void spiWriteRegN(uint8_t addr, const uint8_t *value, uint8_t numValues) {
+      uint8_t buf[numValues+1] = { addr | SX1231_SPI_WRITE_MASK };
+      for (uint8_t n=0; n < numValues; n++) { 
+        RADIO_SPI_DEBUG("[W] *%02x := %02x\n", addr+n, value[n]);
+        buf[n+1] = value[n];
+      }
       spiSelect();
+      spi_write_blocking(spi_, buf, 1 + numValues);
+      spiUnselect();
+    }
 
+    uint8_t spiReadReg(uint8_t addr, bool alwaysSuppressDebug=false) {
+      spiSelect();
       uint8_t dst = 0xaa;
       addr = addr & ~SX1231_SPI_WRITE_MASK;
-      sleep_ms(10);
-      spiReadError = spi_write_blocking(spi, &addr, 1) != 1;
-      spiReadError = spiReadError || spi_read_blocking(spi, 0, &dst, 1) != 1;
-      sleep_ms(10);
-
+      spiReadError_ = spi_write_blocking(spi_, &addr, 1) != 1;
+      spiReadError_ = spiReadError_ || spi_read_blocking(spi_, 0, &dst, 1) != 1;
       spiUnselect();
-
-      printf("[R] *%02x -> %02x (%s)\n", addr, dst, spiReadError ? "!" : "✓");
+      if (!alwaysSuppressDebug) { RADIO_SPI_DEBUG("[R] *%02x -> %02x (%s)\n", addr, dst, spiReadError_ ? "!" : "✓"); }
       return dst;
     }
 
     void init() {
-      initError = false;
-      version = spiReadReg(SX1231_REG_10_VERSION);
-      if (spiReadError) {
-        initError = true;
+      initError_ = false;
+      version_ = spiReadReg(SX1231_REG_10_VERSION);
+      if (spiReadError_) {
+        initError_ = true;
         return;
       }
 
@@ -152,17 +168,14 @@ public:
       opmode = (opmode & ~SX1231_OPMODE_MODE_MASK) | SX1231_OPMODE_MODE_STBY;
       spiWriteReg(SX1231_REG_01_OPMODE, opmode);
       spiReadReg(SX1231_REG_01_OPMODE);
-      while (!spiReadError && !(spiReadReg(SX1231_REG_27_IRQFLAGS1) & SX1231_IRQFLAGS1_MODEREADY));
+      while (!spiReadError_ && !(spiReadReg(SX1231_REG_27_IRQFLAGS1) & SX1231_IRQFLAGS1_MODEREADY));
 
-      // We dont have a lot to set up because we will be running on continuous receive and not transmitting
-      // So leave lots of stuff in default; if for some reason the boost was on turn it off
-      // If high power boost set previously, disable it
-      spiWriteReg(SX1231_REG_5A_TESTPA1, 0x55);
-      spiWriteReg(SX1231_REG_5C_TESTPA2, 0x70);
+      // Note, our configuration is contingent on having just been reset
 
       // Set an initial frequency
-      writeFrequency(433920000);
+      writeFrequency(frequency_);
 
+      // Prepare for OOK reception
       enableConOOK();
 
       // Read back the current operating mode & confirm we set the data mode succesfully
@@ -171,21 +184,20 @@ public:
       uint8_t map1 = spiReadReg(SX1231_REG_25_DIOMAPPING1);
       uint8_t map2 = spiReadReg(SX1231_REG_26_DIOMAPPING2);
 
-      // Go to rx mode
-      opmode = spiReadReg(SX1231_REG_01_OPMODE);
-      opmode = (opmode & ~SX1231_OPMODE_MODE_MASK) | SX1231_OPMODE_MODE_RX;
-      spiWriteReg(SX1231_REG_01_OPMODE, opmode);
-      spiReadReg(SX1231_REG_01_OPMODE);
-      while (!spiReadError && !(spiReadReg(SX1231_REG_27_IRQFLAGS1) & SX1231_IRQFLAGS1_MODEREADY));
-
-      spiReadReg(SX1231_REG_10_VERSION);
-      spiReadReg(SX1231_REG_01_OPMODE);
-      spiReadReg(SX1231_REG_01_OPMODE);
-
       uint32_t frq = readFrequency();
 
       // Note, DIO2 is always OOK out in Continuous mode
       printf("Actual OPMODE=%02x DATAMOD=%02x DIOMAP=%02x %02x FRQ=%u\n", opMode, datMode, map1, map2, frq);
+    }
+  
+    void enableReceiver() {
+      // Go to rx mode
+      uint8_t opmode = spiReadReg(SX1231_REG_01_OPMODE);
+      opmode = (opmode & ~SX1231_OPMODE_MODE_MASK) | SX1231_OPMODE_MODE_RX;
+      spiWriteReg(SX1231_REG_01_OPMODE, opmode);
+      while (!spiReadError_ && !(spiReadReg(SX1231_REG_27_IRQFLAGS1) & SX1231_IRQFLAGS1_MODEREADY));
+      opmode = spiReadReg(SX1231_REG_01_OPMODE);
+      printf("Actual OPMODE=%02x\n", opmode);
     }
 
     void writeFrequency(uint32_t frequency_hz, bool cs=true) {
@@ -196,10 +208,9 @@ public:
       // --> Fc = FXOSC / 2^19 x FrF
       // --> Frf = Fc * 2^19 / FXOSC
       uint64_t frf = (uint64_t(frequency_hz) << 19) / FXOSC;
-      // Write to registers MSB, MID, LSB
-      spiWriteReg(SX1231_REG_07_FRFMSB, (frf >> 16) & 0xff);
-      spiWriteReg(SX1231_REG_08_FRFMID, (frf >> 8) & 0xff);
-      spiWriteReg(SX1231_REG_09_FRFLSB, frf & 0xff);
+      // Write to successive registers MSB, MID, LSB
+      uint8_t buf[3] = { (frf >> 16) & 0xff, (frf >> 8) & 0xff, frf & 0xff };
+      spiWriteRegN(SX1231_REG_07_FRFMSB, buf, 3);
     }
 
     uint32_t readFrequency(bool cs=true) {
@@ -210,7 +221,24 @@ public:
       return uint32_t(frf >> 19);
     }
 
+    static inline float byteToRSSI(uint8_t rssi) {
+      return rssi / -2.0F;
+    }
+    
+    uint8_t readRSSIByte() {
+        return spiReadReg(SX1231_REG_24_RSSIVALUE, true);
+    }
+
     void enableConOOK(bool cs=true) {
+
+      // Set a value for FDEV that works for us; 512 x ~61hZ ~= 30.7kHz
+      // The 20dB BW = 2x(FDEV + BRate/2), so this gives us approx 64kHz 20dB bandwidth, the default is too narrow
+      spiWriteReg(SX1231_REG_05_FDEVMSB, 0x10);
+      spiWriteReg(SX1231_REG_06_FDEVLSB, 0x00);
+      // And AFC; DCC_FREQ=0b111 (DC Offset cancellation) used during AFC as opposed to OOK (so this could be redundant)
+      spiWriteReg(SX1231_REG_1A_AFCBW, 0xe0);
+      spiWriteReg(SX1231_REG_6F_TESTDAGC, 0x30);
+
       // Enable continuous OOK mode without bit synchronisation,
       // because we are trying to receive OOK transmissions from anywhere
       const uint8_t MODEM_CONFIG_OOK_CONT_NO_SYNC =
@@ -227,14 +255,34 @@ public:
       // For OOK this is the chip rate so 2x the bitrate
       // Without setting the bitrate, the OOK decoder in Pulseview fails to work
       // and you can see significant noise on each bit
-      const uint32_t OOK_BITRATE = RFM_OOK_CHIPRATE;
-      const uint8_t brLSB = (FXOSC / OOK_BITRATE) & 0xff;
-      const uint8_t brMSB = ((FXOSC / OOK_BITRATE) >> 8) & 0xff;    
+      const uint8_t brLSB = (FXOSC / chipRate_) & 0xff;
+      const uint8_t brMSB = ((FXOSC / chipRate_) >> 8) & 0xff;    
 
       spiWriteReg(SX1231_REG_02_DATAMODUL, MODEM_CONFIG_OOK_CONT_NO_SYNC);
       spiWriteReg(SX1231_REG_03_BITRATEMSB, brMSB);
       spiWriteReg(SX1231_REG_04_BITRATELSB, brLSB);
       spiWriteReg(SX1231_REG_19_RXBW, MODEM_CONFIG_BW_100k_DCC_1);
+    }
+
+    void dumpRegisters() {
+      const uint8_t numRegisters = 0x72;
+      uint8_t reg[numRegisters] = { 0 };
+      for (uint8_t i=0; i < numRegisters; i++) {
+        spiSelect();
+        spi_write_blocking(spi_, &i, 1);
+        spi_read_blocking(spi_, 0, reg+i, 1);
+        spiUnselect();
+      }
+      for (int i=0; i < numRegisters;) {
+        printf("%02x", reg[i]);
+        i++;
+        if (i % 16) {
+          printf(" ");
+        } else {
+          printf("\n");
+        }
+      }
+      printf("\n");
     }
 };
 

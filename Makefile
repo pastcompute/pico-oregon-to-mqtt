@@ -6,7 +6,7 @@ all:;
 relay_serial: build/app/relay_serial.elf
 
 flash/relay_serial: build/app/relay_serial.elf
-	openocd -f interface/raspberrypi-swd.cfg -f target/rp2040.cfg -c "program $(<) verify reset exit"
+	openocd -f interface/raspberrypi-swd.cfg -f target/rp2040.cfg -c "program $(<) verify exit"
 	$(MAKE) reset
 
 build/app: FORCE
