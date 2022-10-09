@@ -1,8 +1,5 @@
 #ifndef POTM_CONFIG_H_
 #define POTM_CONFIG_H_
-// rx tx sck cs --> 0/4 3/7 2/6 
-
-
 
 #define RFM69_MISO 4u
 #define RFM69_MOSI 7u

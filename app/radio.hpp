@@ -1,14 +1,8 @@
 #ifndef POTM_RADIO_H_
 #define POTM_RADIO_H_
 
-#ifndef _PICO_STDLIB_H
 #include <pico/stdlib.h>
-#endif
-
-#ifndef _HARDWARE_SPI_H
 #include <hardware/spi.h>
-#endif
-
 #include <assert.h>
 
 #pragma GCC diagnostic push
