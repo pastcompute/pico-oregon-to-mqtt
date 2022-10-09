@@ -3,6 +3,7 @@
 #include <pico/multicore.h>
 #include <hardware/spi.h>
 #include <hardware/gpio.h>
+#include <pico/util/queue.h>
 
 #include "decoder/DecodeOOK.hpp"
 #include "decoder/OregonDecoderV2.hpp"
@@ -11,7 +12,7 @@
 #include "config.h"
 #include "radio.hpp"
 
-critical_section_t sensor_crit;
+bool debugMessageHex = false;
 
 struct sensorData_t {
   uint8_t channel;
@@ -20,16 +21,17 @@ struct sensorData_t {
   uint8_t hum;
   uint16_t actualType;
   bool battOK;
+  uint64_t t;
 };
 
-static sensorData_t sensorData;
+queue_t decodedMessageQueue;
 
 critical_section_t dio2_crit;
 
 struct dio2_shared_data_t {
   volatile uint32_t edgesCount;
   volatile uint32_t nextPulseLength_us;
-  volatile uint32_t now;
+  volatile uint64_t now;
 };
 
 static dio2_shared_data_t sharedData = {
@@ -91,25 +93,36 @@ void core1_main() {
         uint8_t len;
         const uint8_t* data = oregonV2Decoder.getData(len);
         if (data) {
-          for (uint8_t i = 0; i < len; i++) {
-            printf("%02x", data[i]);
+          if (debugMessageHex) {
+            for (uint8_t i = 0; i < len; i++) {
+              printf("%02x", data[i]);
+            }
+            printf("\n");
           }
-          printf("\n");
           // Rolling code is BCD...
           if (protocol.decodeTempHumidity(data, len,
                 result.actualType, result.channel, result.rollingCode,
                 result.temp, result.hum, result.battOK)) {
+            result.t = now_us;
             decoded = true;
           }
           // if decoded is false it was either scrambled or something we dont understand yet
+          if (!decoded && !debugMessageHex) {
+            printf("???:");
+            for (uint8_t i = 0; i < len; i++) {
+              printf("%02x", data[i]);
+            }
+            printf("\n");
+          }
         }
         oregonV2Decoder.resetDecoder();
       }
       if (decoded) {
         // push the decoded msg back to the other core...
-        auto t = to_ms_since_boot(get_absolute_time());
-        printf("%d,%04x,%d,%x,%.1f,%d,Batt=%s,FIXMEdB\n", t, 
-          result.actualType, result.channel, result.rollingCode, result.temp / 10.F, result.hum, result.battOK?"ok":"flat");
+        // printf("%d,%04x,%d,%x,%.1f,%d,Batt=%s,FIXMEdB\n", result.t, 
+        //   result.actualType, result.channel, result.rollingCode, result.temp / 10.F, result.hum, result.battOK?"ok":"flat");
+
+        queue_try_add(&decodedMessageQueue, &result);
       }
     }
   }
@@ -133,6 +146,16 @@ void core0_main(RFM69Radio& radio) {
   float longTermMean = +1;
   auto t0 = to_ms_since_boot(get_absolute_time());
   while (true) {
+
+    sensorData_t nextDecodedMessage;
+    if (queue_try_remove(&decodedMessageQueue, &nextDecodedMessage)) {
+      absolute_time_t t;
+      update_us_since_boot(&t, nextDecodedMessage.t);
+      printf("%d,%04x,%d,%x,%.1f,%d,Batt=%s,FIXMEdB\n",to_ms_since_boot(t), 
+        nextDecodedMessage.actualType, nextDecodedMessage.channel, nextDecodedMessage.rollingCode,
+        nextDecodedMessage.temp / 10.F, nextDecodedMessage.hum, nextDecodedMessage.battOK?"ok":"flat");
+    }
+
     tNow = get_absolute_time();
     if (time_reached(tNextPoll)) {
       tNextPoll = delayed_by_us(tNow, rssiPoll_us);
@@ -188,6 +211,8 @@ int main() {
     printf("Version=0x%02x\n", radio.getVersion());
     radio.enableReceiver();
     //radio.dumpRegisters();
+
+    queue_init(&decodedMessageQueue, sizeof(sensorData_t), 3);
 
     multicore_launch_core1(core1_main);
     core0_main(radio);
