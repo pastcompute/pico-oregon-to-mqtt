@@ -1,0 +1,20 @@
+{
+    "configurations": [
+        {
+            "name": "picosdk",
+            "includePath": [
+                "../pico-sdk/src/**",
+                "build/generated/pico_base/**",
+                "${workspaceFolder}/lib/**"
+            ],
+            "defines": [
+                "PICO_BUILD=1",
+            ],
+            "cStandard": "c99",
+            "cppStandard": "gnu++11",
+            "intelliSenseMode": "arm-none-eabi",
+            "configurationProvider": "ms-vscode.cmake-tools"
+        }
+    ],
+    "version": 4
+}
