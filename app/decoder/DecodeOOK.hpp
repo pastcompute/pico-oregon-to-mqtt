@@ -1,8 +1,10 @@
+#include <pico/stdlib.h>
+
 class DecodeOOK {
 protected:
-    byte total_bits, bits, flip, state, pos, data[25];
+    uint8_t total_bits, bits, flip, state, pos, data[25];
 
-    virtual char decode (word width) =0;
+    virtual char decode (uint16_t width) =0;
 
 public:
 
@@ -10,7 +12,7 @@ public:
 
     DecodeOOK () { resetDecoder(); }
 
-    bool nextPulse (word width) {
+    bool nextPulse (uint16_t width) {
         if (state != DONE)
 
             switch (decode(width)) {
@@ -22,7 +24,7 @@ public:
 
     bool isDone () const { return state == DONE; }
 
-    const byte* getData (byte& count) const {
+    const uint8_t* getData (uint8_t& count) const {
         count = pos;
         return data;
     }
@@ -36,7 +38,7 @@ public:
 
     virtual void gotBit (char value) {
         total_bits++;
-        byte *ptr = data + pos;
+        uint8_t *ptr = data + pos;
         *ptr = (*ptr >> 1) | (value << 7);
 
         if (++bits >= 8) {
@@ -56,27 +58,27 @@ public:
     }
 
     // move bits to the front so that all the bits are aligned to the end
-    void alignTail (byte max =0) {
+    void alignTail (uint8_t max =0) {
         // align bits
         if (bits != 0) {
             data[pos] >>= 8 - bits;
-            for (byte i = 0; i < pos; ++i)
+            for (uint8_t i = 0; i < pos; ++i)
                 data[i] = (data[i] >> bits) | (data[i+1] << (8 - bits));
             bits = 0;
         }
-        // optionally shift bytes down if there are too many of 'em
+        // optionally shift uint8_ts down if there are too many of 'em
         if (max > 0 && pos > max) {
-            byte n = pos - max;
+            uint8_t n = pos - max;
             pos = max;
-            for (byte i = 0; i < pos; ++i)
+            for (uint8_t i = 0; i < pos; ++i)
                 data[i] = data[i+n];
         }
     }
 
     void reverseBits () {
-        for (byte i = 0; i < pos; ++i) {
-            byte b = data[i];
-            for (byte j = 0; j < 8; ++j) {
+        for (uint8_t i = 0; i < pos; ++i) {
+            uint8_t b = data[i];
+            for (uint8_t j = 0; j < 8; ++j) {
                 data[i] = (data[i] << 1) | (b & 1);
                 b >>= 1;
             }
@@ -84,7 +86,7 @@ public:
     }
 
     void reverseNibbles () {
-        for (byte i = 0; i < pos; ++i)
+        for (uint8_t i = 0; i < pos; ++i)
             data[i] = (data[i] << 4) | (data[i] >> 4);
     }
 

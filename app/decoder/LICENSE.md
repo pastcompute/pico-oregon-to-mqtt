@@ -1,6 +1,6 @@
 The MIT License (MIT)
 
-Copyright (c) 2022 Andrew McDonnell <bugs@andrewmcdonnell.net>
+Copyright (c) 2022 Andrew McDonnell <bugs@andrewmcdonnell.net> forked from https://github.com/Cactusbone/ookDecoder
 Copyright (c) 2014 Charly Koza <cactusbone@free.fr>
 Copyright (c) 2012 Olivier Lebrun <olivier.lebrun@connectingstuff.net>
 Copyright (c) 2012 Dominique Pierre (zzdomi)

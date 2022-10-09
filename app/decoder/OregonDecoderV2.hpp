@@ -17,9 +17,9 @@ public:
         state = OK;
     }
 
-    virtual char decode (word width) {
+    virtual char decode (uint16_t width) {
         if (300 <= width && width < 1300) {
-            byte w = width >= 800;
+            uint8_t w = width >= 800;
             switch (state) {
                 case UNKNOWN:
                     if (w != 0) {

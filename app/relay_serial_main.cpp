@@ -4,9 +4,25 @@
 #include <hardware/spi.h>
 #include <hardware/gpio.h>
 
+#include "decoder/DecodeOOK.hpp"
+#include "decoder/OregonDecoderV2.hpp"
+#include "decoder/OregonProtocol.hpp"
 #include "constants.h"
 #include "config.h"
 #include "radio.hpp"
+
+critical_section_t sensor_crit;
+
+struct sensorData_t {
+  uint8_t channel;
+  uint8_t rollingCode;
+  int16_t temp;
+  uint8_t hum;
+  uint16_t actualType;
+  bool battOK;
+};
+
+static sensorData_t sensorData;
 
 critical_section_t dio2_crit;
 
@@ -55,16 +71,47 @@ void core1_main() {
   gpio_set_irq_enabled(RFM69_DIO2, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
   irq_set_enabled(IO_IRQ_BANK0, true);
 
+  OregonDecoderV2 oregonV2Decoder;
+  OregonProtocol protocol;
   while (true) {
     __wfi();
     
-    // critical_section_enter_blocking(&crit1);
-    // auto pulseLength_us = sharedData.nextPulseLength_us;
-    // sharedData.nextPulseLength_us = 0;
-    // auto now_us = sharedData.now;
-    // critical_section_exit(&crit1);
-
-
+    // Every edge, try and decode a message
+    // We have around 400 uS to get this done, worst case
+ 
+    critical_section_enter_blocking(&dio2_crit);
+    auto pulseLength_us = sharedData.nextPulseLength_us;
+    sharedData.nextPulseLength_us = 0;
+    auto now_us = sharedData.now;
+    critical_section_exit(&dio2_crit);
+    sensorData_t result;
+    if (pulseLength_us != 0) {
+      bool decoded = false;
+      if (oregonV2Decoder.nextPulse(pulseLength_us)) {
+        uint8_t len;
+        const uint8_t* data = oregonV2Decoder.getData(len);
+        if (data) {
+          for (uint8_t i = 0; i < len; i++) {
+            printf("%02x", data[i]);
+          }
+          printf("\n");
+          // Rolling code is BCD...
+          if (protocol.decodeTempHumidity(data, len,
+                result.actualType, result.channel, result.rollingCode,
+                result.temp, result.hum, result.battOK)) {
+            decoded = true;
+          }
+          // if decoded is false it was either scrambled or something we dont understand yet
+        }
+        oregonV2Decoder.resetDecoder();
+      }
+      if (decoded) {
+        // push the decoded msg back to the other core...
+        auto t = to_ms_since_boot(get_absolute_time());
+        printf("%d,%04x,%d,%x,%.1f,%d,Batt=%s,FIXMEdB\n", t, 
+          result.actualType, result.channel, result.rollingCode, result.temp / 10.F, result.hum, result.battOK?"ok":"flat");
+      }
+    }
   }
 }
 
