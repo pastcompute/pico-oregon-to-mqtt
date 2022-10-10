@@ -1,8 +1,10 @@
 #include <pico/stdlib.h>
 
 class DecodeOOK {
+public:
+    enum { MAX_MESSAGE_BYTES = 25 };
 protected:
-    uint8_t total_bits, bits, flip, state, pos, data[25];
+    uint8_t total_bits, bits, flip, state, pos, data[MAX_MESSAGE_BYTES];
 
     virtual char decode (uint16_t width) =0;
 

@@ -1,54 +1,63 @@
+/// This pico program will detect and decode Oregon weather sensor messages
+/// and output the result on the serial port / USB serial port
+/// in a form easily ingested to MQTT or other home automation systems
+///
+/// The main core configures the RFM69 module SX1231 radio chip,
+/// monitors the RSSI, decodes the oregon message protocol and outputs
+/// this to the serial port.
+///
+/// The second core processes rising and falling edge interrupts on the demodulated
+/// OOK signal output by the SX1231 on dio2, and uses the time between edges
+/// to detect and decode Manchester-encoded binary and the Oregon protocol
+/// sending the messages to the other core for output.
+///
+/// My unproven hypothesis is that dedicating the second core to timing and
+/// mnchester detection may reduce the likelihood of a dropped
+/// message when the device is communicating.
+
 #include <stdio.h>
 #include <pico/stdlib.h>
 #include <pico/multicore.h>
 #include <hardware/spi.h>
 #include <hardware/gpio.h>
 #include <pico/util/queue.h>
+#include <algorithm>
 
 #include "decoder/DecodeOOK.hpp"
 #include "decoder/OregonDecoderV2.hpp"
 #include "decoder/OregonProtocol.hpp"
 #include "constants.h"
 #include "config.h"
+#include "types.hpp"
 #include "radio.hpp"
 
-bool debugMessageHex = false;
+/// Set this to true to have the second core dump decoded manchester in hex to the serial port.
+static bool debugMessageHex = false;
 
-struct sensorData_t {
-  uint8_t channel;
-  uint8_t rollingCode;
-  int16_t temp;
-  uint8_t hum;
-  uint16_t actualType;
-  bool battOK;
-  uint64_t t;
-};
+/// Message queue used to transfer decoded Manchester OOK from the second core to the first
+static queue_t decodedMessagesQueue;
 
-queue_t decodedMessageQueue;
+/// This critical section protects data shared between the dio2 interrupt handler and the second core main loop.
+static critical_section_t dio2_crit;
 
-critical_section_t dio2_crit;
+/// This data is shared between the dio2 interrupt handler and the second core main loop
+static Dio2SharedData_t sharedData;
 
-struct dio2_shared_data_t {
-  volatile uint32_t edgesCount;
-  volatile uint32_t nextPulseLength_us;
-  volatile uint64_t now;
-};
-
-static dio2_shared_data_t sharedData = {
-  .edgesCount = 0,
-  .nextPulseLength_us = 0,
-  .now = 0,
-};
-
-void dio2InterruptHandler() {
-  static uint32_t prevTime_us = 0;
+/// RFM69 SX1231 dio2 Interrupt handler
+extern "C" void dio2InterruptHandler() {
   if (gpio_get_irq_event_mask(RFM69_DIO2) & GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL) {
       gpio_acknowledge_irq(RFM69_DIO2, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL);
   }
+
+  // this may not handle wrap, but I think we can ignore that for the moment
+  // it means we may get one edge with a massive size, at 2^64/10^6 seconds after power on
+  // and we can live with corrupting potentially one message on such a timeframe
+  auto now = time_us_64();
+
   // From the second and successive interrupt, sharedData.nextPulseLength_us will hold the time between successive interrupts
   // and local prevTime_us will track what micros() was
   // sharedData.nextPulseLength_us is cleared after being processed in the loop
-  auto now = time_us_64(); // this may not handle wrap, but I think we can ignore that for the moment
+  static uint64_t prevTime_us = 0;
   critical_section_enter_blocking(&dio2_crit);
   sharedData.now = now;
   sharedData.nextPulseLength_us = now - prevTime_us;
@@ -57,11 +66,78 @@ void dio2InterruptHandler() {
   prevTime_us = now;
 }
 
-void core1_main() {
+/// This class can try and detect and decode messages from one or more OOK Manchester encodings
+
+class ManchesterHandler {
+private:
+  OregonDecoderV2 oregonV2Decoder_;
+  OregonProtocol protocol_;
+
+  ReceivedMessage_t lastDecodedMessage_;
+
+public:
+  ManchesterHandler()
+  {}
+
+  const ReceivedMessage_t& getLastDecodedMessage() const {
+    return lastDecodedMessage_;
+  }
+
+  /// This should be called from the main loop ith the most recent pulse length in microseconds.
+  /// This class maintains state, so this method when called consecutively for every edge detected
+  /// will eventually detect and decode an entire message if received.
+  /// When a message was succesfully decoded it may be accessed by getLastDecodedMessage() until
+  /// the next call to nextPulse()
+  /// @return  false if no entire message was detected, true if a message completed decoding
+  bool nextPulse(uint32_t pulseLength_us, uint64_t now_us) {
+    ReceivedMessage_t message;
+    if (oregonV2Decoder_.nextPulse(pulseLength_us)) {
+      if (!decodeV2(now_us, message)) {
+        // it was either scrambled or something we dont understand yet
+        // we expect the result to be of UnknownSensorData_t
+      }
+      oregonV2Decoder_.resetDecoder();
+    }
+    // else if { // Repeat for other message encodings... }
+    lastDecodedMessage_ = message;
+    return message.isValid();
+  }
+
+private:
+
+  void dumpMessageHex(const uint8_t* data, uint8_t len) {
+    for (uint8_t i = 0; i < len; i++) {
+      printf("%02x", data[i]);
+    }
+    printf("\n");
+  }
+
+  bool decodeV2(uint64_t now_us, ReceivedMessage_t& msg) {
+    uint8_t len;
+    auto data = oregonV2Decoder_.getData(len);
+    if (!data) { return false; }
+    if (debugMessageHex) { dumpMessageHex(data, len); }
+
+    // Note that the "rolling code" is BCD...
+    OregonSensorData_t result;
+    if (protocol_.decodeTempHumidity(data, len,
+          result.actualType, result.channel, result.rollingCode,
+          result.temp, result.hum, result.battOK)) {
+      result.t_us = now_us;
+      msg = ReceivedMessage_t(result);
+      return true;
+    }
+    UnknownSensorData_t unknown = UnknownSensorData_t::Create(data, len, now_us);
+    msg = ReceivedMessage_t(unknown);
+    return false;
+  }
+};
+
+/// Entry point for second core.
+static void core1_main() {
   printf("Core1: OOK Demodulator\n");
 
   sharedData = { 0, 0, 0 };
-
   critical_section_init(&dio2_crit);
 
   // Interrupt on the pin connected to DIO2, with pulldown
@@ -73,57 +149,37 @@ void core1_main() {
   gpio_set_irq_enabled(RFM69_DIO2, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
   irq_set_enabled(IO_IRQ_BANK0, true);
 
-  OregonDecoderV2 oregonV2Decoder;
-  OregonProtocol protocol;
+  // Initialise the manchester detector/decoders
+  ManchesterHandler manchesterHandler;
   while (true) {
+    // Idle at low power when not procesing
     __wfi();
-    
-    // Every edge, try and decode a message
-    // We have around 400 uS to get this done, worst case
- 
+
+    // Pickup the next data if there is any    
     critical_section_enter_blocking(&dio2_crit);
     auto pulseLength_us = sharedData.nextPulseLength_us;
     sharedData.nextPulseLength_us = 0;
     auto now_us = sharedData.now;
     critical_section_exit(&dio2_crit);
-    sensorData_t result;
-    if (pulseLength_us != 0) {
-      bool decoded = false;
-      if (oregonV2Decoder.nextPulse(pulseLength_us)) {
-        uint8_t len;
-        const uint8_t* data = oregonV2Decoder.getData(len);
-        if (data) {
-          if (debugMessageHex) {
-            for (uint8_t i = 0; i < len; i++) {
-              printf("%02x", data[i]);
-            }
-            printf("\n");
-          }
-          // Rolling code is BCD...
-          if (protocol.decodeTempHumidity(data, len,
-                result.actualType, result.channel, result.rollingCode,
-                result.temp, result.hum, result.battOK)) {
-            result.t = now_us;
-            decoded = true;
-          }
-          // if decoded is false it was either scrambled or something we dont understand yet
-          if (!decoded && !debugMessageHex) {
-            printf("???:");
-            for (uint8_t i = 0; i < len; i++) {
-              printf("%02x", data[i]);
-            }
-            printf("\n");
-          }
-        }
-        oregonV2Decoder.resetDecoder();
-      }
-      if (decoded) {
-        // push the decoded msg back to the other core...
-        // printf("%d,%04x,%d,%x,%.1f,%d,Batt=%s,FIXMEdB\n", result.t, 
-        //   result.actualType, result.channel, result.rollingCode, result.temp / 10.F, result.hum, result.battOK?"ok":"flat");
 
-        queue_try_add(&decodedMessageQueue, &result);
-      }
+    if (pulseLength_us < 1) {
+      // this is a failsafe; as a general rule, because we use wfi, we should not
+      // get here until there has been an edge. However, if we decide to process
+      // additional interrupts, then we will get here.
+      continue;
+    }
+
+    // Every edge, try and decode a message
+    // We have around 400 uS to get this done, worst case, when processing valid Oregon messages
+    // The decoder fails as soon as it can
+
+    bool decoded = manchesterHandler.nextPulse(pulseLength_us, now_us);
+    if (decoded) {
+      // push the decoded msg back to the other core...
+      // printf("%d,%04x,%d,%x,%.1f,%d,Batt=%s,FIXMEdB\n", result.t, 
+      //   result.actualType, result.channel, result.rollingCode, result.temp / 10.F, result.hum, result.battOK?"ok":"flat");
+      auto message = manchesterHandler.getLastDecodedMessage();
+      queue_try_add(&decodedMessagesQueue, &message);
     }
   }
 }
@@ -147,13 +203,33 @@ void core0_main(RFM69Radio& radio) {
   auto t0 = to_ms_since_boot(get_absolute_time());
   while (true) {
 
-    sensorData_t nextDecodedMessage;
-    if (queue_try_remove(&decodedMessageQueue, &nextDecodedMessage)) {
+    ReceivedMessage_t nextDecodedMessage;
+    if (queue_try_remove(&decodedMessagesQueue, &nextDecodedMessage)) {
       absolute_time_t t;
-      update_us_since_boot(&t, nextDecodedMessage.t);
-      printf("%d,%04x,%d,%x,%.1f,%d,Batt=%s,FIXMEdB\n",to_ms_since_boot(t), 
-        nextDecodedMessage.actualType, nextDecodedMessage.channel, nextDecodedMessage.rollingCode,
-        nextDecodedMessage.temp / 10.F, nextDecodedMessage.hum, nextDecodedMessage.battOK?"ok":"flat");
+      switch (nextDecodedMessage.type) {
+        case ReceivedMessage_t::OREGON: {
+          OregonSensorData_t& od = nextDecodedMessage.value.oregonSensor;  
+          update_us_since_boot(&t, od.t_us);
+          printf("%d,%04x,%d,%x,%.1f,%d,Batt=%s,FIXMEdB\n", to_ms_since_boot(t), 
+            od.actualType, od.channel, od.rollingCode,
+            od.temp / 10.F, od.hum, od.battOK?"ok":"flat");
+          break;
+        }
+
+        case ReceivedMessage_t::UNKNOWN: {
+          UnknownSensorData_t& ud = nextDecodedMessage.value.unknown;
+          update_us_since_boot(&t, ud.t_us);
+          size_t mx = ud.len * 2 + 1;
+          char hexdump[mx];
+          char*p = hexdump;
+          for (int i=0; i < ud.len; i++) {
+            p = p + snprintf(p, hexdump + mx - p, "%02x", ud.bytes[i]);
+          }
+          printf("%d,UNK,%s\n", to_ms_since_boot(t), hexdump); 
+          break;
+        }
+
+      }
     }
 
     tNow = get_absolute_time();
@@ -212,7 +288,7 @@ int main() {
     radio.enableReceiver();
     //radio.dumpRegisters();
 
-    queue_init(&decodedMessageQueue, sizeof(sensorData_t), 3);
+    queue_init(&decodedMessagesQueue, sizeof(ReceivedMessage_t), 3);
 
     multicore_launch_core1(core1_main);
     core0_main(radio);
