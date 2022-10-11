@@ -29,6 +29,7 @@
 #include "constants.h"
 #include "config.h"
 #include "types.hpp"
+#include "ringbuf.hpp"
 #include "radio.hpp"
 
 /// Set this to true to have the second core dump decoded manchester in hex to the serial port.
@@ -36,6 +37,11 @@ static bool debugMessageHex = false;
 
 /// Message queue used to transfer decoded Manchester OOK from the second core to the first
 static queue_t decodedMessagesQueue;
+
+typedef RingBuffer<DecodedMessageUnion_t, 5> RingBuffer_t;
+
+/// Data store for the message queue
+static RingBuffer_t decodedMessagesRingBuffer;
 
 /// This critical section protects data shared between the dio2 interrupt handler and the second core main loop.
 static critical_section_t dio2_crit;
@@ -45,14 +51,14 @@ static Dio2SharedData_t sharedData;
 
 /// RFM69 SX1231 dio2 Interrupt handler
 extern "C" void dio2InterruptHandler() {
-  if (gpio_get_irq_event_mask(RFM69_DIO2) & GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL) {
-      gpio_acknowledge_irq(RFM69_DIO2, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL);
-  }
-
   // this may not handle wrap, but I think we can ignore that for the moment
   // it means we may get one edge with a massive size, at 2^64/10^6 seconds after power on
   // and we can live with corrupting potentially one message on such a timeframe
   auto now = time_us_64();
+
+  if (gpio_get_irq_event_mask(RFM69_DIO2) & GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL) {
+      gpio_acknowledge_irq(RFM69_DIO2, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL);
+  }
 
   // From the second and successive interrupt, sharedData.nextPulseLength_us will hold the time between successive interrupts
   // and local prevTime_us will track what micros() was
@@ -73,34 +79,37 @@ private:
   OregonDecoderV2 oregonV2Decoder_;
   OregonProtocol protocol_;
 
-  ReceivedMessage_t lastDecodedMessage_;
-
 public:
   ManchesterHandler()
   {}
 
-  const ReceivedMessage_t& getLastDecodedMessage() const {
-    return lastDecodedMessage_;
-  }
-
   /// This should be called from the main loop ith the most recent pulse length in microseconds.
   /// This class maintains state, so this method when called consecutively for every edge detected
   /// will eventually detect and decode an entire message if received.
-  /// When a message was succesfully decoded it may be accessed by getLastDecodedMessage() until
-  /// the next call to nextPulse()
-  /// @return  false if no entire message was detected, true if a message completed decoding
+  /// When a message was succesfully decoded it may be accessed as the current head of the ring buffer
+  /// @return  false if no entire message was detected or the ring buffer was full; true if a message completed decoding
   bool nextPulse(uint32_t pulseLength_us, uint64_t now_us) {
-    ReceivedMessage_t message;
+    // Try each decoder in turn, see if we have captured a complete message
+    bool ok = false;
     if (oregonV2Decoder_.nextPulse(pulseLength_us)) {
-      if (!decodeV2(now_us, message)) {
-        // it was either scrambled or something we dont understand yet
-        // we expect the result to be of UnknownSensorData_t
+      // OK, see if we can decode it to something we know.
+      // Whether we can or not, this goes on the queue, because we want to output hex of unknown messages
+
+      auto element = decodedMessagesRingBuffer.reserve();
+      if (element) {
+        if (!decodeV2(now_us, *element)) {
+          // it was either scrambled or something we dont understand yet
+          // we would expect value to be BaseType_t::UNKNOWN
+        }
+        decodedMessagesRingBuffer.advance();
+        ok = true;
+      } else {
+        // queue full! all we can do is discard
       }
+      // make ready for next messge
       oregonV2Decoder_.resetDecoder();
+      return ok;
     }
-    // else if { // Repeat for other message encodings... }
-    lastDecodedMessage_ = message;
-    return message.isValid();
   }
 
 private:
@@ -112,23 +121,23 @@ private:
     printf("\n");
   }
 
-  bool decodeV2(uint64_t now_us, ReceivedMessage_t& msg) {
+  bool decodeV2(uint64_t now_us, DecodedMessageUnion_t& msg) {
     uint8_t len;
     auto data = oregonV2Decoder_.getData(len);
     if (!data) { return false; }
     if (debugMessageHex) { dumpMessageHex(data, len); }
 
-    // Note that the "rolling code" is BCD...
-    OregonSensorData_t result;
+    // Prepare the common data and initialise to unknown
+    DecodedMessage_t::init(msg.base, DecodedMessage_t::BaseType_t::UNDECODED, data, len, now_us);
+
+    // Try for a temperature / humidity sensor
     if (protocol_.decodeTempHumidity(data, len,
-          result.actualType, result.channel, result.rollingCode,
-          result.temp, result.hum, result.battOK)) {
-      result.t_us = now_us;
-      msg = ReceivedMessage_t(result);
+          msg.oregon.actualType, msg.oregon.channel, msg.oregon.rollingCode,
+          msg.oregon.temp, msg.oregon.hum, msg.oregon.battOK)) {
+      // yes, it is
+      msg.base.baseType = DecodedMessage_t::BaseType_t::OREGON;
       return true;
     }
-    UnknownSensorData_t unknown = UnknownSensorData_t::Create(data, len, now_us);
-    msg = ReceivedMessage_t(unknown);
     return false;
   }
 };
@@ -178,8 +187,11 @@ static void core1_main() {
       // push the decoded msg back to the other core...
       // printf("%d,%04x,%d,%x,%.1f,%d,Batt=%s,FIXMEdB\n", result.t, 
       //   result.actualType, result.channel, result.rollingCode, result.temp / 10.F, result.hum, result.battOK?"ok":"flat");
-      auto message = manchesterHandler.getLastDecodedMessage();
-      queue_try_add(&decodedMessagesQueue, &message);
+      //auto message = manchesterHandler.getLastDecodedMessage();
+
+      // OK this is hacky; using our lock free queue we dont even need the Pico Queue, we just need some way to wake the other core
+      int flag = 1;
+      queue_try_add(&decodedMessagesQueue, &flag); // this is lossy, but thats ok too
     }
   }
 }
@@ -203,32 +215,38 @@ void core0_main(RFM69Radio& radio) {
   auto t0 = to_ms_since_boot(get_absolute_time());
   while (true) {
 
-    ReceivedMessage_t nextDecodedMessage;
-    if (queue_try_remove(&decodedMessagesQueue, &nextDecodedMessage)) {
-      absolute_time_t t;
-      switch (nextDecodedMessage.type) {
-        case ReceivedMessage_t::OREGON: {
-          OregonSensorData_t& od = nextDecodedMessage.value.oregonSensor;  
-          update_us_since_boot(&t, od.t_us);
-          printf("%d,%04x,%d,%x,%.1f,%d,Batt=%s,FIXMEdB\n", to_ms_since_boot(t), 
-            od.actualType, od.channel, od.rollingCode,
-            od.temp / 10.F, od.hum, od.battOK?"ok":"flat");
-          break;
-        }
-
-        case ReceivedMessage_t::UNKNOWN: {
-          UnknownSensorData_t& ud = nextDecodedMessage.value.unknown;
-          update_us_since_boot(&t, ud.t_us);
-          size_t mx = ud.len * 2 + 1;
-          char hexdump[mx];
-          char*p = hexdump;
-          for (int i=0; i < ud.len; i++) {
-            p = p + snprintf(p, hexdump + mx - p, "%02x", ud.bytes[i]);
+    int flag;
+    if (queue_try_remove(&decodedMessagesQueue, &flag)) {
+      assert(flag == 1);
+      auto tail = decodedMessagesRingBuffer.peek();
+      if (tail.has_value()) {
+        auto element = tail.value();
+        decodedMessagesRingBuffer.pop();
+        absolute_time_t t;
+        switch (element.base.baseType) {
+          case DecodedMessage_t::BaseType_t::OREGON: {
+            OregonSensorData_t& od = element.oregon;  
+            update_us_since_boot(&t, od.rawTime_us);
+            printf("%d,%04x,%d,%x,%.1f,%d,Batt=%s,FIXMEdB\n", to_ms_since_boot(t), 
+              od.actualType, od.channel, od.rollingCode,
+              od.temp / 10.F, od.hum, od.battOK?"ok":"flat");
+            break;
           }
-          printf("%d,UNK,%s\n", to_ms_since_boot(t), hexdump); 
-          break;
-        }
 
+          case DecodedMessage_t::BaseType_t::UNDECODED: {
+            DecodedMessage_t& ud = element.base;
+            update_us_since_boot(&t, ud.rawTime_us);
+            size_t mx = ud.len * 2 + 1;
+            char hexdump[mx];
+            char*p = hexdump;
+            for (int i=0; i < ud.len; i++) {
+              p = p + snprintf(p, hexdump + mx - p, "%02x", ud.bytes[i]);
+            }
+            printf("%d,UNK,%s\n", to_ms_since_boot(t), hexdump); 
+            break;
+          }
+
+        }
       }
     }
 
@@ -288,7 +306,7 @@ int main() {
     radio.enableReceiver();
     //radio.dumpRegisters();
 
-    queue_init(&decodedMessagesQueue, sizeof(ReceivedMessage_t), 3);
+    queue_init(&decodedMessagesQueue, sizeof(int), decodedMessagesRingBuffer.getMaxElements());
 
     multicore_launch_core1(core1_main);
     core0_main(radio);
