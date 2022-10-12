@@ -3,6 +3,7 @@
 
 #include "decoder/DecodeOOK.hpp"
 #include "decoder/OregonDecoderV2.hpp"
+#include "decoder/OregonDecoderV3.hpp"
 #include "decoder/OregonProtocol.hpp"
 
 /// This class can try and detect and decode messages from one or more OOK Manchester encodings
@@ -10,6 +11,7 @@
 class ManchesterHandler {
 private:
   OregonDecoderV2 oregonV2Decoder_;
+  OregonDecoderV3 oregonV3Decoder_;
   OregonProtocol protocol_;
 
 public:
@@ -33,6 +35,17 @@ public:
       }
       // make ready for next messge
       oregonV2Decoder_.resetDecoder();
+      return true;
+    }
+    if (oregonV3Decoder_.nextPulse(pulseLength_us)) {
+      // OK, see if we can decode it to something we know
+      // Whether we can or not, this goes on the queue, because we want to output hex of unknown messages
+      if (!decodeV3(now_us, msg)) {
+        // it was either scrambled or something we dont understand yet
+        // we would expect value to be BaseType_t::UNKNOWN
+      }
+      // make ready for next messge
+      oregonV3Decoder_.resetDecoder();
       return true;
     }
     // The pulse did not complete a frame
@@ -65,6 +78,10 @@ private:
       msg.base.baseType = DecodedMessage_t::BaseType_t::OREGON;
       return true;
     }
+    return false;
+  }
+
+  bool decodeV3(uint64_t now_us, DecodedMessageUnion_t& msg) {
     return false;
   }
 };
