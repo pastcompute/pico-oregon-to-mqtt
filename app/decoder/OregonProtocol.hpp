@@ -32,6 +32,7 @@ public:
     return false;
   }
 
+  // This will not alter any outputs unless the length and checksum pass
   static bool decodeTempHumidity(const uint8_t* data, int len, uint16_t& actualType, uint8_t& channel, uint8_t& rollingCode, int16_t& temp, uint8_t& hum, bool& battOK) {
     if (len < 8) { return false; }
     const uint16_t sensorType = (data[0] << 8) | data[1];

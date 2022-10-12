@@ -67,9 +67,9 @@ public:
 
   /// @brief Copy oldest element from the ring buffer. This is only safe if caller is only place also calling popBack() 
   /// @return Copy of back object, or nullptr if empty
-  std::optional<Element_t> peek() const {
-    if (head == tail) { return {}; } // empty
-    return ring[tail];
+  const Element_t* peek() const {
+    if (head == tail) { return NULL; } // empty
+    return ring + tail;
   }   
 
 };
