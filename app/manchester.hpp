@@ -29,6 +29,7 @@ public:
     if (oregonV2Decoder_.nextPulse(pulseLength_us)) {
       // OK, see if we can decode it to something we know
       // Whether we can or not, this goes on the queue, because we want to output hex of unknown messages
+      // Decoding finishes after 160 unscrambled bits (max of 40 nibbles), or a gap > 2500us x 8
       if (!decodeV2(now_us, msg)) {
         // it was either scrambled or something we dont understand yet
         // we would expect value to be BaseType_t::UNKNOWN
@@ -36,6 +37,9 @@ public:
       // make ready for next messge
       oregonV2Decoder_.resetDecoder();
       return true;
+    } else if (oregonV2Decoder_.hasOverflow()) {
+        printf("V2 Overflow\n");
+        oregonV2Decoder_.clearOverflow();
     }
     if (oregonV3Decoder_.nextPulse(pulseLength_us)) {
       // OK, see if we can decode it to something we know
@@ -47,6 +51,9 @@ public:
       // make ready for next messge
       oregonV3Decoder_.resetDecoder();
       return true;
+    } else if (oregonV3Decoder_.hasOverflow()) {
+        printf("V3 Overflow\n");
+        oregonV2Decoder_.clearOverflow();
     }
     // The pulse did not complete a frame
     return false;

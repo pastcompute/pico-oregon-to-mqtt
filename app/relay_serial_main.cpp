@@ -30,7 +30,8 @@
 #include "radio.hpp"
 #include "manchester.hpp"
 
-/// Set this to true to have the second core dump decoded manchester in hex to the serial port.
+/// Set this to true to have the second core dump all decoded manchester in hex to the serial port.
+/// Note that unknown data is also output by core0
 static bool debugMessageHex = false;
 
 /// Allocate a fixed ring buffer that can hold up to 10 elements
@@ -236,3 +237,7 @@ int main() {
     multicore_launch_core1(core1_main);
     core0_main(radio);
 }
+
+// Notable observations:
+// THGN123N temp + humid every 39 seconds
+// Something not a V2 or V3, every 67 seconds (on the RTL-SDR) and 73 (here) - my freezer?

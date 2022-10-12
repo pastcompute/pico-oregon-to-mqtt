@@ -2,9 +2,11 @@
 
 class DecodeOOK {
 public:
-    enum { MAX_MESSAGE_BYTES = 25 };
+    enum { MAX_MESSAGE_BYTES = 48 };
 protected:
     uint8_t total_bits, bits, flip, state, pos, data[MAX_MESSAGE_BYTES];
+
+    bool overflow;
 
     virtual char decode (uint16_t width) =0;
 
@@ -13,6 +15,12 @@ public:
     enum { UNKNOWN, T0, T1, T2, T3, OK, DONE };
 
     DecodeOOK () { resetDecoder(); }
+
+    bool hasOverflow() const { return overflow; }
+
+    void clearOverflow() {
+        overflow = false;
+    }
 
     bool nextPulse (uint16_t width) {
         if (state != DONE)
@@ -33,6 +41,7 @@ public:
 
     void resetDecoder () {
         total_bits = bits = pos = flip = 0;
+        overflow = false;
         state = UNKNOWN;
     }
 
@@ -47,6 +56,7 @@ public:
             bits = 0;
             if (++pos >= sizeof data) {
                 resetDecoder();
+                overflow = true;
                 return;
             }
         }
