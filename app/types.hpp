@@ -65,6 +65,7 @@ struct Dio2SharedData_t {
   volatile uint32_t edgesCount; ///< Statistical diagnostics - count of number of edges detected 
   volatile uint32_t nextPulseLength_us; ///< Duration between the previous and latest edge; this is cleared when read by the main loop to avoid duplication
   volatile uint64_t now; ///< raw timestamp from then the latest edge was detected
+  volatile bool fallingEdge; ///< If true,  nextPulseLength_us is time signal was high, otherwise, time signal was low
 };
 
 #endif

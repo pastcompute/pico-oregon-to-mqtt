@@ -53,7 +53,8 @@ extern "C" void dio2InterruptHandler() {
   // and we can live with corrupting potentially one message on such a timeframe
   auto now = time_us_64();
 
-  if (gpio_get_irq_event_mask(RFM69_DIO2) & GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL) {
+  auto mask = gpio_get_irq_event_mask(RFM69_DIO2);
+  if (mask & GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL) {
       gpio_acknowledge_irq(RFM69_DIO2, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL);
   }
 
@@ -65,6 +66,7 @@ extern "C" void dio2InterruptHandler() {
   sharedData.now = now;
   sharedData.nextPulseLength_us = now - prevTime_us;
   sharedData.edgesCount++;
+  sharedData.fallingEdge = mask & GPIO_IRQ_EDGE_FALL;
   critical_section_exit(&dio2_crit);
   prevTime_us = now;
 }
@@ -101,6 +103,7 @@ static void core1_main() {
     auto pulseLength_us = sharedData.nextPulseLength_us;
     sharedData.nextPulseLength_us = 0;
     auto now_us = sharedData.now;
+    auto fallingEdge = sharedData.fallingEdge;
     critical_section_exit(&dio2_crit);
 
     if (pulseLength_us < 1) {
