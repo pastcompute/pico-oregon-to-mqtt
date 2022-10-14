@@ -131,7 +131,7 @@ static void core1_main() {
 
 // On Core0, loop and measure RSSI and run the decoder when there is a new pulse
 void core0_main(RFM69Radio& radio) {
-  const int rssiPoll_us = 25;
+  const int rssiPoll_us = 50;
   auto nextOutput_us = ONE_SECOND_US /4;
 
   absolute_time_t tNow = get_absolute_time();
@@ -202,6 +202,10 @@ void core0_main(RFM69Radio& radio) {
       if (rssi > floorRssi) { floorRssi = rssi; }
     }
     if (time_reached(tNextOutput)) {
+      // TODO: instead of sample and averaging, lets just record every value in a history buffer
+      // and then we can use the timestamp to correlate a nearby peak with messages
+
+
       // Here we are "integrating" the received "energy" above the floor
       // Of course RSSI is dB and relative to "something" but this is a useful proxy still
       // A period with no transmissions will have a lower value...

@@ -15,7 +15,8 @@
 
 // Oregon is 1024Hz, doubled for chiprate for the Manchester encoding
 // Using higher even multiples may help the same code work for other transmitters
-#define RFM_OOK_CHIPRATE (1024  * 2)
+//#define RFM_OOK_CHIPRATE (1024  * 2)
+#define RFM_OOK_CHIPRATE (5950000 / 675)  // chip rate of 8814 -approx-> 5.95x Lacrosse, 9.02x Oregon
 
 #define SPI_BAUD_RATE (1000*1000)
 

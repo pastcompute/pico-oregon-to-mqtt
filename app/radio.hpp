@@ -227,8 +227,9 @@ public:
 
       // Set a value for FDEV that works for us; 512 x ~61hZ ~= 30.7kHz
       // The 20dB BW = 2x(FDEV + BRate/2), so this gives us approx 64kHz 20dB bandwidth, the default is too narrow
-      spiWriteReg(SX1231_REG_05_FDEVMSB, 0x10);
-      spiWriteReg(SX1231_REG_06_FDEVLSB, 0x00);
+      //spiWriteReg(SX1231_REG_05_FDEVMSB, 0x10);
+      spiWriteReg(SX1231_REG_05_FDEVMSB, 0x10); // 704 --> 44kHz
+      spiWriteReg(SX1231_REG_06_FDEVLSB, 0xc0);
       // And AFC; DCC_FREQ=0b111 (DC Offset cancellation) used during AFC as opposed to OOK (so this could be redundant)
       spiWriteReg(SX1231_REG_1A_AFCBW, 0xe0);
       spiWriteReg(SX1231_REG_6F_TESTDAGC, 0x30);
@@ -250,7 +251,10 @@ public:
       // Without setting the bitrate, the OOK decoder in Pulseview fails to work
       // and you can see significant noise on each bit
       const uint8_t brLSB = (FXOSC / chipRate_) & 0xff;
-      const uint8_t brMSB = ((FXOSC / chipRate_) >> 8) & 0xff;    
+      const uint8_t brMSB = ((FXOSC / chipRate_) >> 8) & 0xff;
+
+      // We can still pickup the Lacrosse, but have some noise on one of them
+      // 675uS --> 1481Hz. Common multiple wowuld be a chip rate of 67.5uS for a close approx?
 
       spiWriteReg(SX1231_REG_02_DATAMODUL, MODEM_CONFIG_OOK_CONT_NO_SYNC);
       spiWriteReg(SX1231_REG_03_BITRATEMSB, brMSB);
