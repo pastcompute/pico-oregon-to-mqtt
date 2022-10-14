@@ -8,31 +8,52 @@
 class Spectrograph {
 private:
 
-  /// Sum of RSSI values in the current integration interval
+  /// Sum of RSSI values in the current integration interval, updated each call to updateRssi()
   /// At an interval of 50us the worst case should be 510000
-  uint32_t runningSum_ = 0;
+  /// Reset by integration()
+  uint32_t runningSum_;
 
-  /// Number of RSSI values in the current integration interval
+  /// Number of RSSI values in the current integration interval, incremented each call to updateRssi()
   /// At an interval of 50us this should be no more than 20000 in a second
-  uint runningCount_ = 0;
+  /// Reset by integration()
+  uint runningCount_;
 
-  /// Highest RSSI byte seen in period (aka lowest -dB value x 2)
-  uint8_t floorByte_ = 0;
+  /// Lowest RSSI byte seen in period (scale: 0 --> -0dBm, 255 --> -127.5dBm
+  /// Reset by integration()
+  uint8_t rssiPeakByte_;
 
+  /// Long term mean of integration background energy (+1 means not yet set, as will be case on first call to integration())
+  /// This is actually the sum of all values of runningSum / -2.F, we then divide it by periods_ to compute background
+  /// Updated by integration()
   float longTermMean_ = +1;
-  uint periods_ = 0;
 
+  /// Number of times integration() has been called since reset
+  uint periods_;
+
+  /// Number of "dB" difference between the floor and the average energy in a given period for a detection
+  float detectionthreshold_ = 2;
+  /// True if there was a detection in the last call to integrate()
   bool detection_;
+  /// Energy computed by the last call to integrate()
   float energy_;
+  /// Background computed by the last call to integrate()
   float background_;
+  /// Peak computed by last call to integrate()
+  float peak_;
 
 public:
-  Spectrograph() { }
+  Spectrograph() { reset(); }
 
   void reset() {
     runningSum_ = 0;
     runningCount_ = 0;
-    floorByte_ = 0;
+    rssiPeakByte_ = 255;
+    longTermMean_ = +1;
+    periods_ = 0;
+    detection_ = false;
+    energy_ = -128.F;
+    background_ = 0.F;
+    peak_ = 0.F;
   }
 
   /// Each RSSI sample, update the running sum for the current integration interval
@@ -40,10 +61,13 @@ public:
   void updateRssi(uint8_t rssiByte) {
     runningSum_ += rssiByte;
     runningCount_++;
-    if (rssiByte > floorByte_) { floorByte_ = rssiByte; }
+    if (rssiByte < rssiPeakByte_) { rssiPeakByte_ = rssiByte; }
   }
 
-  /// Call at end of integration time
+  /// Call at end of integration time. Sums the energy in the interval, and sets detection flag if the average
+  /// exceeds the background by some threshold.
+  /// The following constraints apply:
+  /// - the background is averaged since power up; perhaps a rolling background might be better
   void integrate() {
     // Here we are "integrating" the received "energy" above the floor
     // Of course RSSI is dB and relative to "something" but this is a useful proxy still
@@ -61,27 +85,21 @@ public:
 
     // Now we are going to "detect" transmissions as a deviation where the total energy in this
     // integration interval is above the long term floor
-    detection_ = periods_ > 1 && energyProxy - background > 2;
+    detection_ = periods_ > 1 && energyProxy - background > detectionthreshold_;
     energy_ = energyProxy;
     background_ = background;
+    peak_ = rssiPeakByte_ / -2.0;
 
-    // TODO: we could also realtime detection on individual RSSI bins...
-
-    // if (periods_ > 1 && detection) {
-    //     printf("%8.2f %6.1f %6.1f    ", (t1 - t0) / 1000.F, background, energyProxy);
-    //     // Bin this into 3dB slots from -127
-    //     int nx = (energyProxy + 127.5F) / 3.F;
-    //     for (int i=0; i < nx; i++) { printf("*"); } printf("\n");
-    // } else if (spectrographData.periods < 1) { 
-    //     printf("%8.2f %6.1f (initial integration)\n", (t1 - t0) / 1000.F, background);
-    // }
     runningSum_ = 0;
     runningCount_ = 0;
+    rssiPeakByte_ = 255;
+
     periods_ ++;
   }
 
   float getBackground() const { return background_; }
   float getEnergy() const { return energy_; }
+  float getPeak() const { return peak_; }
   bool getDetection() const { return detection_; }
 };
 
