@@ -19,15 +19,11 @@ private:
   uint16_t longWidthHi;
 
   uint16_t prevWidth;
-
-  int8_t t3Pending;
-
 public:
   int8_t doneReason;
 
   LacrosseDecoder(uint8_t tolerancePercent = 33) {
     prevWidth = 0;
-    t3Pending = -1;
     init(tolerancePercent);
   }
   inline void setToleranceRange(uint16_t t_us, uint8_t tolerancePercent, uint16_t& lo, uint16_t& hi) {
@@ -41,8 +37,8 @@ public:
     syncWidthHi = T_SYNC + 70; // try and filter out oregon
     setToleranceRange(T_SHORT, tolerancePercent, shortWidthLo, shortWidthHi);
     setToleranceRange(T_LONG, tolerancePercent, longWidthLo, longWidthHi);
-    longWidthLo += 50; // dont overcook the hi range
-    shortWidthHi += 50; // and give short a tad more
+    longWidthLo += 65; // dont overcook the hi range
+    shortWidthHi += 70; // and give short a tad more
     printf("%d %d %d %d %d %d\n", syncWidthLo, syncWidthHi, shortWidthLo, shortWidthHi, longWidthLo, longWidthHi);
   }
 
@@ -63,7 +59,6 @@ public:
           if (flip == 8) {
             // We assume this was a 0...
             // now we should get short-long or long-short's x 40
-            t3Pending = -1;
             doneReason = 0;
             return DECODE_CONTINUE;
           }
@@ -136,26 +131,6 @@ public:
           return DECODE_CONTINUE;
         }
         break;
-      //   // Long followed by long, _could_ be long-short then short-long where short-short is detected as long.  But we dont know the polarity...
-      //   t3Pending = 0;
-      //   state = T3;
-      //   return DECODE_CONTINUE;
-      // case T3:
-      //   // long-short followed by short-long detected as long-long-long 
-      //   if (t3Pending == 0 && longPulse) {
-      //     state = T0;
-      //     gotBit(1);
-      //     gotBit(0);
-      //     return DECODE_CONTINUE;
-      //   }
-      //   // short-long followed by short-long detected as short-long-long 
-      //   if (t3Pending == 1 && longPulse) {
-      //     state = T0;
-      //     gotBit(1);
-      //     gotBit(0);
-      //     return DECODE_CONTINUE;
-      //   }
-      //   // long-short followed by short-long || short-short, short-short
       default:
         panic("Invalid state");
         break;

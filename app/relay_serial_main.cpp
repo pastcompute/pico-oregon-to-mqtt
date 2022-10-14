@@ -160,7 +160,7 @@ void core0_main(RFM69Radio& radio) {
         case DecodedMessage_t::BaseType_t::OREGON: {
           const OregonSensorData_t& od = tail->oregon;  
           update_us_since_boot(&t, od.rawTime_us);
-          printf("%d,%04x,%d,%x,%.1f,%d,Batt=%s,FIXMEdB\n", to_ms_since_boot(t), 
+          printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s\n", to_ms_since_boot(t),
             od.actualType, od.channel, od.rollingCode,
             od.temp / 10.F, od.hum, od.battOK?"ok":"flat");
           break;
@@ -169,7 +169,7 @@ void core0_main(RFM69Radio& radio) {
         case DecodedMessage_t::BaseType_t::LACROSSE: {
           const LacrosseSensorData_t& d = tail->lacrosse;
           update_us_since_boot(&t, d.rawTime_us);
-          printf("%d,%d,%.1f,%d,Batt=%s,FIXMEdB\n", to_ms_since_boot(t), 
+          printf("Lacrosse,%d,%d,%.1f,%s\n", to_ms_since_boot(t),
             d.id, d.channel, (d.temp - 500.F) / 10.F, d.battOK?"ok":"flat");
           break;
         }

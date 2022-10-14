@@ -80,7 +80,7 @@ private:
     msg.lacrosse.channel = channel;
     msg.lacrosse.id = id;
     msg.lacrosse.temp = temp;
-    printf("%d %d %d %.1f\n", id, channel, batt, (temp - 500) / 10.F);
+    //printf("%d %d %d %.1f\n", id, channel, batt, (temp - 500) / 10.F);
     return true;
   }
 
