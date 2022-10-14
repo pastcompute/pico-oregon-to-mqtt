@@ -23,7 +23,9 @@ private:
   Index_t advanced; // next value of head computed in reserve()
 
 public:
-  RingBuffer() : head(0), tail(0), reserved(false), advanced(0) {}
+  RingBuffer() : head(0), tail(0), reserved(false), advanced(0) {
+    //assert(1u << uint32_t(8 * sizeof(INDEX_TYPE) > NUM_ELEMENTS - 1 && NUM_ELEMENTS > 1);
+  }
 
   Index_t getMaxElements() const { return NUM_ELEMENTS; }
 
@@ -43,6 +45,31 @@ public:
     return &ring[cur];
   }
 
+  bool isFull() const {
+    auto v = (head + 1) % NUM_ELEMENTS;
+    return v == tail;
+  }
+
+  bool isEmpty() const {
+    return head == tail;
+  }
+
+  Index_t count() const {
+    return head > tail ? head - tail : NUM_ELEMENTS - (tail - head);
+  }
+
+  /// Where memory copy is not critical, push a new element on the head
+  /// @return false if already full
+  bool push(const Element_t& o) {
+    assert(!reserved);
+    if (reserved) { return false; }
+    Index_t next = head + 1;
+    if (next == (Index_t)NUM_ELEMENTS) { next = 0; }
+    if (next == tail) { return false; } // full
+    ring[head] = o;
+    head = next;
+  }
+
   /// @brief Call when done with the memory from reserve() and the other side is free to pop
   /// Note, the purpose of these shenanigans limit the number of memcpys
   /// It is only safe for reserve() and advance() to be called in the same context
@@ -52,7 +79,6 @@ public:
     head = advanced;
     reserved = false;
   }
-
 
   /// @brief Remove oldest element from the ring buffer
   /// @return false if already empty
@@ -70,8 +96,56 @@ public:
   const Element_t* peek() const {
     if (head == tail) { return NULL; } // empty
     return ring + tail;
-  }   
+  }
 
+  // find closest element using leftmost binary search. Assumes elements are ordered..!
+  template<typename compareFunction>
+  const Element_t* binarySearch(const Element_t& o, compareFunction f, Index_t offset, Index_t& idx) {
+    // For expediency, algorthm from Wikipedia...
+    // FIXME this is not properly safe! only use on the consumer; the count can _increase_ as can the head
+    int L=0, R=count();
+    int h0 = head;
+    // should be a mutex around the above...
+    int m = 0;
+    // FIXME the ring buffer is also in reverse order... eldest is tail .... newest is head-1
+    while (L < R) {
+      m = (L + R) / 2;
+      int x = (h0 + m) % NUM_ELEMENTS;
+      auto b = f(ring[x], o);
+      if (b  < 0) {
+        L = m + 1;
+      } else {
+        R = m;
+      }
+    }
+    idx = m;
+    auto p = head + m;
+    return ring + ((head + m) % NUM_ELEMENTS);
+  }
+
+#if 0
+    // start at the head and move to the half way point
+    int m = NUM_ELEMENTS / 2;
+    auto mid = (head + m) % NUM_ELEMENTS;
+    do {
+      // return -1 (mid < o), 0, +1 (mid > o)
+      int b = compareFunction(ring + mid);
+      if (b < 0) {
+        m = m >> 1;
+        mid = mid + m;
+        continue;
+      }
+      if (b > 0) {
+        m = m >> 1;
+        mid = mid - m;
+        continue;
+      }
+      if (b == 0) {
+        return ring + mid;
+      }
+    } while (true);
+  }
+#endif
 };
 
 

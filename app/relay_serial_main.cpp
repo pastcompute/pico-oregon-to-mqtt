@@ -41,11 +41,30 @@ static bool debugSpectrograph = true;
 /// Set this to true to suppress decoder output and instead stream continuous spectrograph
 static bool continuousSpectrograph = false;
 
-/// Allocate a fixed ring buffer that can hold up to 10 elements
-typedef RingBuffer<DecodedMessageUnion_t, 10> RingBuffer_t;
+/// Allocate a fixed ring buffer that can hold up to 15 elements
+/// Until we implement message merging in the decoder in Core1,
+/// this lets us cope with a Lacross that repeats a message 12 times happening at the same time as an oregon (etc)
+typedef RingBuffer<DecodedMessageUnion_t, 15> RingBuffer_t;
 
 /// Ring buffer store for the message queue. This is a lock free buffer where core1 writes and core0 reads
 static RingBuffer_t decodedMessagesRingBuffer;
+
+/// RSSI polling interval
+const int rssiPoll_us = 50;
+
+/// RSSI spectrograph integration interval
+auto spectrographIntegation_us = ONE_SECOND_US / 4;
+struct TimestampedRssi_t {
+  uint32_t t;
+  uint8_t rssiByte;
+};
+
+/// Keep last part second of RSSI samples. At 50uS, we want the peak of the RSSI for
+/// the next say 200ms from the start of a message, plus some delay, so hold 1/4 sec in buffer
+/// so we can search for it
+typedef RingBuffer<TimestampedRssi_t, ONE_SECOND_US/rssiPoll_us/4,uint16_t> RssiRingBuffer_t;
+
+static RssiRingBuffer_t rssiBuffer;
 
 /// This critical section protects data shared between the dio2 interrupt handler and the second core main loop.
 static critical_section_t dio2_crit;
@@ -55,12 +74,6 @@ static Dio2SharedData_t sharedData;
 
 /// Common time on entry to core0 main loop
 static absolute_time_t core0now;
-
-/// RSSI polling interval
-const int rssiPoll_us = 50;
-
-/// RSSI spectrograph integration interval
-auto spectrographIntegation_us = ONE_SECOND_US / 4;
 
 /// RFM69 SX1231 dio2 Interrupt handler
 extern "C" void dio2InterruptHandler() {
@@ -147,11 +160,24 @@ static void core1_main() {
 
 void outuptDecoder(const DecodedMessageUnion_t* item) {
   absolute_time_t t;
+  update_us_since_boot(&t, item->base.rawTime_us);
+  uint32_t tb = to_ms_since_boot(t);
+
+  // try and find the RSSI sample closest to the timestamp
+  // rssiBuffer is ordered, so we could do a binary search
+  // This will break if the timestamp (ms since boot) wraps over 2^32-1
+  // because the timestamps will not be ordered anymore
+  // we should simply detect that and just flush...
+  uint16_t idx;
+  // auto rb = rssiBuffer.binarySearch({tb, 0}, [](auto&a, auto& b){return a.t < b.t ? -1 : 0; }, idx);
+  // auto rssi = rb ? rb->rssiByte / -2.0 : -128;
+  // now, scan a region backward from time of message and pick peak RSSI
+  // fixme
+
   switch (item->base.baseType) {
     case DecodedMessage_t::BaseType_t::OREGON: {
       const OregonSensorData_t& od = item->oregon;  
-      update_us_since_boot(&t, od.rawTime_us);
-      printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s\n", to_ms_since_boot(t),
+      printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s\n", tb,
         od.actualType, od.channel, od.rollingCode,
         od.temp / 10.F, od.hum, od.battOK?"ok":"flat");
       break;
@@ -159,22 +185,20 @@ void outuptDecoder(const DecodedMessageUnion_t* item) {
 
     case DecodedMessage_t::BaseType_t::LACROSSE: {
       const LacrosseSensorData_t& d = item->lacrosse;
-      update_us_since_boot(&t, d.rawTime_us);
-      printf("Lacrosse,%d,%d,%.1f,%s\n", to_ms_since_boot(t),
+      printf("Lacrosse,%d,%d,%.1f,%s\n", tb,
         d.id, d.channel, (d.temp - 500.F) / 10.F, d.battOK?"ok":"flat");
       break;
     }
 
     case DecodedMessage_t::BaseType_t::UNDECODED: {
       const DecodedMessage_t& ud = item->base;
-      update_us_since_boot(&t, ud.rawTime_us);
       size_t mx = ud.len * 2 + 1;
       char hexdump[mx];
       char*p = hexdump;
       for (int i=0; i < ud.len; i++) {
         p = p + snprintf(p, hexdump + mx - p, "%02x", ud.bytes[i]);
       }
-      printf("%d,UNK,%s\n", to_ms_since_boot(t), hexdump); 
+      printf("%d,UNK,%s\n", tb, hexdump);
       break;
     }
 
@@ -219,6 +243,12 @@ void core0_main(RFM69Radio& radio) {
       tNextPoll = delayed_by_us(core0now, rssiPoll_us);
       rssi = radio.readRSSIByte();
       spectrograph.updateRssi(rssi);
+
+      // save RSSI into a timestamped FIFO; when a decoded message arrives, search for nearest
+      if (rssiBuffer.isFull()) {
+        rssiBuffer.pop();
+      }
+      rssiBuffer.push({to_ms_since_boot(core0now), rssi});
     }
     if (time_reached(tNextSpectrograph)) {
       // Capture the time the first time integrate() was called

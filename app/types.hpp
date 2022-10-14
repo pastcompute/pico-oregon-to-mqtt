@@ -25,7 +25,8 @@ struct DecodedMessage_t {
 
   BaseType_t baseType; 
 
-  uint64_t rawTime_us;                    ///< value of time_us_64() at start of the IRQ handler
+  uint64_t rawTime_us;                    ///< value of time_us_64() at start of the IRQ handler for the last pulse when
+                                          ///< the message was complete
 
   uint8_t len;                            ///< Number of raw decoded bytes that was decoded
   uint8_t bytes[MAX_RAW_MESSAGE_BYTES];   ///< Raw decoded bytes (may be truncated)

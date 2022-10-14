@@ -65,6 +65,8 @@ public:
     energy_ = energyProxy;
     background_ = background;
 
+    // TODO: we could also realtime detection on individual RSSI bins...
+
     // if (periods_ > 1 && detection) {
     //     printf("%8.2f %6.1f %6.1f    ", (t1 - t0) / 1000.F, background, energyProxy);
     //     // Bin this into 3dB slots from -127
