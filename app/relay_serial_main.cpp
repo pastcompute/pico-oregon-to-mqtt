@@ -131,7 +131,7 @@ static void core1_main() {
 
 // On Core0, loop and measure RSSI and run the decoder when there is a new pulse
 void core0_main(RFM69Radio& radio) {
-  const int rssiPoll_us = 50;
+  const int rssiPoll_us = 25;
   auto nextOutput_us = ONE_SECOND_US /4;
 
   absolute_time_t tNow = get_absolute_time();
@@ -178,6 +178,10 @@ void core0_main(RFM69Radio& radio) {
           printf("%d,UNK,%s\n", to_ms_since_boot(t), hexdump); 
           break;
         }
+
+        default:
+          panic("Unknown type");
+          break;
       }
     }
 

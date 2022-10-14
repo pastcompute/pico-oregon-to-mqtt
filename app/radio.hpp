@@ -8,8 +8,8 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wnarrowing"
 
-#define RADIO_SPI_DEBUG printf
-//#define RADIO_SPI_DEBUG()
+//#define RADIO_SPI_DEBUG printf
+#define RADIO_SPI_DEBUG(x...)
 
 // Instead of using an all-encompassing library such as RadioHead,
 // Just provide convenience wrappers and leverage Pico hardware SPI
