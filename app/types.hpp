@@ -21,7 +21,7 @@ struct DecodedMessage_t {
   enum : uint8_t { MAX_RAW_MESSAGE_BYTES = 100 };
 
   // Because we are using standard-layout, we need to independently keep track of what kind of object this is
-  enum BaseType_t : uint8_t { UNDEFINED = 0, UNDECODED, OREGON, BASETYPE_MAX };
+  enum BaseType_t : uint8_t { UNDEFINED = 0, UNDECODED, OREGON, LACROSSE, BASETYPE_MAX };
 
   BaseType_t baseType; 
 
@@ -54,10 +54,18 @@ struct OregonSensorData_t : public DecodedMessage_t {
   bool battOK;
 };
 
+struct LacrosseSensorData_t : public DecodedMessage_t {
+  uint8_t id;
+  uint8_t channel;
+  int16_t temp;
+  bool battOK;
+};
+
 /// This next structure provides the fixed size array element used for allocating messages in the ring buffer
 union DecodedMessageUnion_t {
   DecodedMessage_t base;
   OregonSensorData_t oregon;
+  LacrosseSensorData_t lacrosse;
 };
 
 /// This structure holds data shared between the dio2 interrupt handler and the second core main loop.

@@ -166,6 +166,14 @@ void core0_main(RFM69Radio& radio) {
           break;
         }
 
+        case DecodedMessage_t::BaseType_t::LACROSSE: {
+          const LacrosseSensorData_t& d = tail->lacrosse;
+          update_us_since_boot(&t, d.rawTime_us);
+          printf("%d,%d,%.1f,%d,Batt=%s,FIXMEdB\n", to_ms_since_boot(t), 
+            d.id, d.channel, (d.temp - 500.F) / 10.F, d.battOK?"ok":"flat");
+          break;
+        }
+
         case DecodedMessage_t::BaseType_t::UNDECODED: {
           const DecodedMessage_t& ud = tail->base;
           update_us_since_boot(&t, ud.rawTime_us);

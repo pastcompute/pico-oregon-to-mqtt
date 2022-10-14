@@ -3,16 +3,18 @@
 
 #include "decoder/DecodeOOK.hpp"
 #include "decoder/OregonDecoderV2.hpp"
-#include "decoder/OregonDecoderV3.hpp"
 #include "decoder/OregonProtocol.hpp"
+#include "lacrosse.hpp"
+#include "util.hpp"
 
 /// This class can try and detect and decode messages from one or more OOK Manchester encodings
 
 class ManchesterHandler {
 private:
   OregonDecoderV2 oregonV2Decoder_;
-  OregonDecoderV3 oregonV3Decoder_;
   OregonProtocol protocol_;
+
+  LacrosseDecoder lacrosseDecoder_;
 
 public:
   bool debugMessageHex;
@@ -38,22 +40,18 @@ public:
       oregonV2Decoder_.resetDecoder();
       return true;
     } else if (oregonV2Decoder_.hasOverflow()) {
-        printf("V2 Overflow\n");
-        oregonV2Decoder_.clearOverflow();
+      printf("V2 Overflow\n");
+      oregonV2Decoder_.clearOverflow();
     }
-    if (oregonV3Decoder_.nextPulse(pulseLength_us)) {
-      // OK, see if we can decode it to something we know
-      // Whether we can or not, this goes on the queue, because we want to output hex of unknown messages
-      if (!decodeV3(now_us, msg)) {
+
+    if (lacrosseDecoder_.nextPulse(pulseLength_us)) {
+      //printf("LTX %d, %d, ", lacrosseDecoder_.getBits(), lacrosseDecoder_.doneReason); bool flip = true; uint8_t len; auto data = lacrosseDecoder_.getData(len); if (true || debugMessageHex && data) { dumpMessageHex(data, len, flip); dumpMessageBinary(data, len, flip); }
+      if (!decodeLacrosse(now_us, msg)) {
         // it was either scrambled or something we dont understand yet
         // we would expect value to be BaseType_t::UNKNOWN
       }
-      // make ready for next messge
-      oregonV3Decoder_.resetDecoder();
+      lacrosseDecoder_.resetDecoder();
       return true;
-    } else if (oregonV3Decoder_.hasOverflow()) {
-        printf("V3 Overflow\n");
-        oregonV2Decoder_.clearOverflow();
     }
     // The pulse did not complete a frame
     return false;
@@ -61,11 +59,29 @@ public:
 
 private:
 
-  void dumpMessageHex(const uint8_t* data, uint8_t len) {
-    for (uint8_t i = 0; i < len; i++) {
-      printf("%02x", data[i]);
-    }
-    printf("\n");
+  bool decodeLacrosse(uint64_t now_us, DecodedMessageUnion_t& msg) {
+    uint8_t len;
+    auto data = lacrosseDecoder_.getData(len);
+    if (!data) { return false; }
+    if (debugMessageHex) { dumpMessageHex(data, len); }
+
+    // Prepare the common data and initialise to unknown
+    DecodedMessage_t::init(msg.base, DecodedMessage_t::BaseType_t::UNDECODED, data, len, now_us);
+
+    uint8_t id = fliplr(data[0]);
+    bool batt = data[1] & 0b1;
+    uint8_t b1 = fliplr(data[1]);
+    uint8_t b2 = fliplr(data[2]);
+    uint16_t temp = (b1 & 0xf) << 8 | b2;
+    uint8_t channel =  (b1 & 0x30) >> 4;
+
+    msg.base.baseType = DecodedMessage_t::BaseType_t::LACROSSE;
+    msg.lacrosse.battOK = batt;
+    msg.lacrosse.channel = channel;
+    msg.lacrosse.id = id;
+    msg.lacrosse.temp = temp;
+    printf("%d %d %d %.1f\n", id, channel, batt, (temp - 500) / 10.F);
+    return true;
   }
 
   bool decodeV2(uint64_t now_us, DecodedMessageUnion_t& msg) {
