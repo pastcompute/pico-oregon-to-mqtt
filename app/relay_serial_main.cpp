@@ -29,13 +29,17 @@
 #include "ringbuf.hpp"
 #include "radio.hpp"
 #include "manchester.hpp"
+#include "spectrograph.hpp"
 
 /// Set this to true to have the second core dump all decoded manchester in hex to the serial port.
 /// Note that unknown data is also output by core0
 static bool debugMessageHex = false;
 
 /// Set this to true to output a spectograph of RSSI detections on Core0
-static bool debugSpectrogtraph = false;
+static bool debugSpectrograph = true;
+
+/// Set this to true to suppress decoder output and instead stream continuous spectrograph
+static bool continuousSpectrograph = false;
 
 /// Allocate a fixed ring buffer that can hold up to 10 elements
 typedef RingBuffer<DecodedMessageUnion_t, 10> RingBuffer_t;
@@ -56,16 +60,7 @@ static absolute_time_t core0now;
 const int rssiPoll_us = 50;
 
 /// RSSI spectrograph integration interval
-auto spectrographIntegation_us = ONE_SECOND_US /4;
-
-/// RSSI spectrograph data
-struct {
-  int32_t runningSum = 0;
-  int runningCount = 0;
-  int periods = 0;
-  uint8_t floorRssi = 0;
-  float longTermMean = +1;
-} spectrographData;
+auto spectrographIntegation_us = ONE_SECOND_US / 4;
 
 /// RFM69 SX1231 dio2 Interrupt handler
 extern "C" void dio2InterruptHandler() {
@@ -150,34 +145,50 @@ static void core1_main() {
   }
 }
 
-void spectrograph() {
-  static auto t0 = to_ms_since_boot(core0now);
+void outuptDecoder(const DecodedMessageUnion_t* item) {
+  absolute_time_t t;
+  switch (item->base.baseType) {
+    case DecodedMessage_t::BaseType_t::OREGON: {
+      const OregonSensorData_t& od = item->oregon;  
+      update_us_since_boot(&t, od.rawTime_us);
+      printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s\n", to_ms_since_boot(t),
+        od.actualType, od.channel, od.rollingCode,
+        od.temp / 10.F, od.hum, od.battOK?"ok":"flat");
+      break;
+    }
 
-  // Here we are "integrating" the received "energy" above the floor
-  // Of course RSSI is dB and relative to "something" but this is a useful proxy still
-  // A period with no transmissions will have a lower value...
-  // The value has units of dB still
-  //float energyProxy = (runningSum - floorRssi * runningCount) / -2.F / runningCount;
-  float energyProxy = spectrographData.runningSum / -2.F / spectrographData.runningCount;
-  if (spectrographData.longTermMean > 0) {
-      spectrographData.longTermMean = energyProxy;
-  } else {
-      spectrographData.longTermMean = (energyProxy + spectrographData.longTermMean);
+    case DecodedMessage_t::BaseType_t::LACROSSE: {
+      const LacrosseSensorData_t& d = item->lacrosse;
+      update_us_since_boot(&t, d.rawTime_us);
+      printf("Lacrosse,%d,%d,%.1f,%s\n", to_ms_since_boot(t),
+        d.id, d.channel, (d.temp - 500.F) / 10.F, d.battOK?"ok":"flat");
+      break;
+    }
+
+    case DecodedMessage_t::BaseType_t::UNDECODED: {
+      const DecodedMessage_t& ud = item->base;
+      update_us_since_boot(&t, ud.rawTime_us);
+      size_t mx = ud.len * 2 + 1;
+      char hexdump[mx];
+      char*p = hexdump;
+      for (int i=0; i < ud.len; i++) {
+        p = p + snprintf(p, hexdump + mx - p, "%02x", ud.bytes[i]);
+      }
+      printf("%d,UNK,%s\n", to_ms_since_boot(t), hexdump); 
+      break;
+    }
+
+    default:
+      panic("Unknown type");
+      break;
   }
-  auto t1 = to_ms_since_boot(core0now);
-  float background = spectrographData.longTermMean / (spectrographData.periods + 1);
-  bool detection = energyProxy - background > 2;
-  if (spectrographData.periods > 1 && detection) {
-      printf("%8.2f %6.1f %6.1f    ", (t1 - t0) / 1000.F, background, energyProxy);
-      // Bin this into 3dB slots from -127
-      int nx = (energyProxy + 127.5F) / 3.F;
-      for (int i=0; i < nx; i++) { printf("*"); } printf("\n");
-  } else if (spectrographData.periods < 1) { 
-      printf("%8.2f %6.1f (initial integration)\n", (t1 - t0) / 1000.F, background);
-  }
-  spectrographData.runningSum = 0;
-  spectrographData.runningCount = 0;
-  spectrographData.periods ++;
+}
+
+void displaySpectrographBar(float energy, float background, uint32_t t0) {
+  printf("%8.2f %6.1f %6.1f    ", (to_ms_since_boot(core0now) - t0) / 1000.F, background, energy);
+    // Bin this into 3dB slots from -127
+    int nx = (energy + 127.5F) / 3.F;
+    for (int i=0; i < nx; i++) { printf("*"); } printf("\n");
 }
 
 // On Core0, loop and measure RSSI and run the decoder when there is a new pulse
@@ -187,8 +198,8 @@ void core0_main(RFM69Radio& radio) {
   absolute_time_t tNextPoll = delayed_by_us(core0now, rssiPoll_us);
   uint8_t rssi = 0;
 
-  // We expect around 10000 samples per output, with a value E 60, 127 s a float should be sufficient
-  spectrographData = { 0, 0, 0, 0, 0.F };
+  Spectrograph spectrograph;
+
   while (true) {
 
     // This core is not so power efficient, we have to continually poll the timer and the ring buffer
@@ -197,42 +208,9 @@ void core0_main(RFM69Radio& radio) {
 
     auto tail = decodedMessagesRingBuffer.peek();
     if (tail) {
-      decodedMessagesRingBuffer.pop();
-      absolute_time_t t;
-      switch (tail->base.baseType) {
-        case DecodedMessage_t::BaseType_t::OREGON: {
-          const OregonSensorData_t& od = tail->oregon;  
-          update_us_since_boot(&t, od.rawTime_us);
-          printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s\n", to_ms_since_boot(t),
-            od.actualType, od.channel, od.rollingCode,
-            od.temp / 10.F, od.hum, od.battOK?"ok":"flat");
-          break;
-        }
-
-        case DecodedMessage_t::BaseType_t::LACROSSE: {
-          const LacrosseSensorData_t& d = tail->lacrosse;
-          update_us_since_boot(&t, d.rawTime_us);
-          printf("Lacrosse,%d,%d,%.1f,%s\n", to_ms_since_boot(t),
-            d.id, d.channel, (d.temp - 500.F) / 10.F, d.battOK?"ok":"flat");
-          break;
-        }
-
-        case DecodedMessage_t::BaseType_t::UNDECODED: {
-          const DecodedMessage_t& ud = tail->base;
-          update_us_since_boot(&t, ud.rawTime_us);
-          size_t mx = ud.len * 2 + 1;
-          char hexdump[mx];
-          char*p = hexdump;
-          for (int i=0; i < ud.len; i++) {
-            p = p + snprintf(p, hexdump + mx - p, "%02x", ud.bytes[i]);
-          }
-          printf("%d,UNK,%s\n", to_ms_since_boot(t), hexdump); 
-          break;
-        }
-
-        default:
-          panic("Unknown type");
-          break;
+      decodedMessagesRingBuffer.pop(); // release a slot ASAP
+      if (!continuousSpectrograph) {
+        outuptDecoder(tail);
       }
     }
 
@@ -240,12 +218,17 @@ void core0_main(RFM69Radio& radio) {
     if (time_reached(tNextPoll)) {
       tNextPoll = delayed_by_us(core0now, rssiPoll_us);
       rssi = radio.readRSSIByte();
-      spectrographData.runningSum += rssi;
-      spectrographData.runningCount++;
-      if (rssi > spectrographData.floorRssi) { spectrographData.floorRssi = rssi; }
+      spectrograph.updateRssi(rssi);
     }
     if (time_reached(tNextSpectrograph)) {
-      spectrograph();
+      // Capture the time the first time integrate() was called
+      static auto t0 = to_ms_since_boot(core0now);
+      spectrograph.integrate();
+      if (debugSpectrograph && !continuousSpectrograph && spectrograph.getDetection()) {
+        displaySpectrographBar(spectrograph.getEnergy(), spectrograph.getBackground(), t0);
+      } else if (continuousSpectrograph) {
+        displaySpectrographBar(spectrograph.getEnergy(), spectrograph.getBackground(), t0);
+      }
       tNextSpectrograph = delayed_by_us(core0now, spectrographIntegation_us);
     }
   }
