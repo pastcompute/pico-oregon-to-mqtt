@@ -1,3 +1,6 @@
+#ifndef DECODER_DECODE_OOK_
+#define DECODER_DECODE_OOK_
+
 #include <pico/stdlib.h>
 
 class DecodeOOK {
@@ -20,6 +23,10 @@ public:
 
     void clearOverflow() {
         overflow = false;
+    }
+
+    uint8_t getBits() const {
+        return total_bits;
     }
 
     bool nextPulse (uint16_t width) {
@@ -108,3 +115,5 @@ public:
         state = DONE;
     }
 };
+
+#endif
