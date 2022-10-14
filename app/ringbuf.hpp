@@ -97,57 +97,6 @@ public:
     if (head == tail) { return NULL; } // empty
     return ring + tail;
   }
-
-  // find closest element using leftmost binary search. Assumes elements are ordered..!
-  template<typename compareFunction>
-  const Element_t* binarySearch(const Element_t& o, compareFunction f, Index_t offset, Index_t& idx) {
-    // For expediency, algorthm from Wikipedia...
-    // FIXME this is not properly safe! only use on the consumer; the count can _increase_ as can the head
-    int L=0, R=count();
-    int h0 = head;
-    // should be a mutex around the above...
-    int m = 0;
-    // FIXME the ring buffer is also in reverse order... eldest is tail .... newest is head-1
-    while (L < R) {
-      m = (L + R) / 2;
-      int x = (h0 + m) % NUM_ELEMENTS;
-      auto b = f(ring[x], o);
-      if (b  < 0) {
-        L = m + 1;
-      } else {
-        R = m;
-      }
-    }
-    idx = m;
-    auto p = head + m;
-    return ring + ((head + m) % NUM_ELEMENTS);
-  }
-
-#if 0
-    // start at the head and move to the half way point
-    int m = NUM_ELEMENTS / 2;
-    auto mid = (head + m) % NUM_ELEMENTS;
-    do {
-      // return -1 (mid < o), 0, +1 (mid > o)
-      int b = compareFunction(ring + mid);
-      if (b < 0) {
-        m = m >> 1;
-        mid = mid + m;
-        continue;
-      }
-      if (b > 0) {
-        m = m >> 1;
-        mid = mid - m;
-        continue;
-      }
-      if (b == 0) {
-        return ring + mid;
-      }
-    } while (true);
-  }
-#endif
 };
-
-
 
 #endif

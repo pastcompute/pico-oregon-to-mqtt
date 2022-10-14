@@ -59,13 +59,6 @@ struct TimestampedRssi_t {
   uint8_t rssiByte;
 };
 
-/// Keep last part second of RSSI samples. At 50uS, we want the peak of the RSSI for
-/// the next say 200ms from the start of a message, plus some delay, so hold 1/4 sec in buffer
-/// so we can search for it
-typedef RingBuffer<TimestampedRssi_t, ONE_SECOND_US/rssiPoll_us/4,uint16_t> RssiRingBuffer_t;
-
-static RssiRingBuffer_t rssiBuffer;
-
 /// This critical section protects data shared between the dio2 interrupt handler and the second core main loop.
 static critical_section_t dio2_crit;
 
@@ -163,17 +156,6 @@ void outuptDecoder(const DecodedMessageUnion_t* item) {
   update_us_since_boot(&t, item->base.rawTime_us);
   uint32_t tb = to_ms_since_boot(t);
 
-  // try and find the RSSI sample closest to the timestamp
-  // rssiBuffer is ordered, so we could do a binary search
-  // This will break if the timestamp (ms since boot) wraps over 2^32-1
-  // because the timestamps will not be ordered anymore
-  // we should simply detect that and just flush...
-  uint16_t idx;
-  // auto rb = rssiBuffer.binarySearch({tb, 0}, [](auto&a, auto& b){return a.t < b.t ? -1 : 0; }, idx);
-  // auto rssi = rb ? rb->rssiByte / -2.0 : -128;
-  // now, scan a region backward from time of message and pick peak RSSI
-  // fixme
-
   switch (item->base.baseType) {
     case DecodedMessage_t::BaseType_t::OREGON: {
       const OregonSensorData_t& od = item->oregon;  
@@ -243,13 +225,8 @@ void core0_main(RFM69Radio& radio) {
       tNextPoll = delayed_by_us(core0now, rssiPoll_us);
       rssi = radio.readRSSIByte();
       spectrograph.updateRssi(rssi);
-
-      // save RSSI into a timestamped FIFO; when a decoded message arrives, search for nearest
-      if (rssiBuffer.isFull()) {
-        rssiBuffer.pop();
-      }
-      rssiBuffer.push({to_ms_since_boot(core0now), rssi});
     }
+
     if (time_reached(tNextSpectrograph)) {
       // Capture the time the first time integrate() was called
       static auto t0 = to_ms_since_boot(core0now);
