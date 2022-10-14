@@ -34,6 +34,9 @@
 /// Note that unknown data is also output by core0
 static bool debugMessageHex = false;
 
+/// Set this to true to output a spectograph of RSSI detections on Core0
+static bool debugSpectrogtraph = false;
+
 /// Allocate a fixed ring buffer that can hold up to 10 elements
 typedef RingBuffer<DecodedMessageUnion_t, 10> RingBuffer_t;
 
@@ -45,6 +48,24 @@ static critical_section_t dio2_crit;
 
 /// This data is shared between the dio2 interrupt handler and the second core main loop
 static Dio2SharedData_t sharedData;
+
+/// Common time on entry to core0 main loop
+static absolute_time_t core0now;
+
+/// RSSI polling interval
+const int rssiPoll_us = 50;
+
+/// RSSI spectrograph integration interval
+auto spectrographIntegation_us = ONE_SECOND_US /4;
+
+/// RSSI spectrograph data
+struct {
+  int32_t runningSum = 0;
+  int runningCount = 0;
+  int periods = 0;
+  uint8_t floorRssi = 0;
+  float longTermMean = +1;
+} spectrographData;
 
 /// RFM69 SX1231 dio2 Interrupt handler
 extern "C" void dio2InterruptHandler() {
@@ -129,23 +150,45 @@ static void core1_main() {
   }
 }
 
+void spectrograph() {
+  static auto t0 = to_ms_since_boot(core0now);
+
+  // Here we are "integrating" the received "energy" above the floor
+  // Of course RSSI is dB and relative to "something" but this is a useful proxy still
+  // A period with no transmissions will have a lower value...
+  // The value has units of dB still
+  //float energyProxy = (runningSum - floorRssi * runningCount) / -2.F / runningCount;
+  float energyProxy = spectrographData.runningSum / -2.F / spectrographData.runningCount;
+  if (spectrographData.longTermMean > 0) {
+      spectrographData.longTermMean = energyProxy;
+  } else {
+      spectrographData.longTermMean = (energyProxy + spectrographData.longTermMean);
+  }
+  auto t1 = to_ms_since_boot(core0now);
+  float background = spectrographData.longTermMean / (spectrographData.periods + 1);
+  bool detection = energyProxy - background > 2;
+  if (spectrographData.periods > 1 && detection) {
+      printf("%8.2f %6.1f %6.1f    ", (t1 - t0) / 1000.F, background, energyProxy);
+      // Bin this into 3dB slots from -127
+      int nx = (energyProxy + 127.5F) / 3.F;
+      for (int i=0; i < nx; i++) { printf("*"); } printf("\n");
+  } else if (spectrographData.periods < 1) { 
+      printf("%8.2f %6.1f (initial integration)\n", (t1 - t0) / 1000.F, background);
+  }
+  spectrographData.runningSum = 0;
+  spectrographData.runningCount = 0;
+  spectrographData.periods ++;
+}
+
 // On Core0, loop and measure RSSI and run the decoder when there is a new pulse
 void core0_main(RFM69Radio& radio) {
-  const int rssiPoll_us = 50;
-  auto nextOutput_us = ONE_SECOND_US /4;
-
-  absolute_time_t tNow = get_absolute_time();
-  absolute_time_t tNextOutput = delayed_by_us(tNow, nextOutput_us);
-  absolute_time_t tNextPoll = delayed_by_us(tNow, rssiPoll_us);
+  core0now = get_absolute_time();
+  absolute_time_t tNextSpectrograph = delayed_by_us(core0now, spectrographIntegation_us);
+  absolute_time_t tNextPoll = delayed_by_us(core0now, rssiPoll_us);
   uint8_t rssi = 0;
 
   // We expect around 10000 samples per output, with a value E 60, 127 s a float should be sufficient
-  int32_t runningSum = 0;
-  int runningCount = 0;
-  int periods = 0;
-  uint8_t floorRssi = 0;
-  float longTermMean = +1;
-  auto t0 = to_ms_since_boot(get_absolute_time());
+  spectrographData = { 0, 0, 0, 0, 0.F };
   while (true) {
 
     // This core is not so power efficient, we have to continually poll the timer and the ring buffer
@@ -193,45 +236,17 @@ void core0_main(RFM69Radio& radio) {
       }
     }
 
-    tNow = get_absolute_time();
+    core0now = get_absolute_time();
     if (time_reached(tNextPoll)) {
-      tNextPoll = delayed_by_us(tNow, rssiPoll_us);
+      tNextPoll = delayed_by_us(core0now, rssiPoll_us);
       rssi = radio.readRSSIByte();
-      runningSum += rssi;
-      runningCount++;
-      if (rssi > floorRssi) { floorRssi = rssi; }
+      spectrographData.runningSum += rssi;
+      spectrographData.runningCount++;
+      if (rssi > spectrographData.floorRssi) { spectrographData.floorRssi = rssi; }
     }
-    if (time_reached(tNextOutput)) {
-      // TODO: instead of sample and averaging, lets just record every value in a history buffer
-      // and then we can use the timestamp to correlate a nearby peak with messages
-
-
-      // Here we are "integrating" the received "energy" above the floor
-      // Of course RSSI is dB and relative to "something" but this is a useful proxy still
-      // A period with no transmissions will have a lower value...
-      // The value has units of dB still
-      //float energyProxy = (runningSum - floorRssi * runningCount) / -2.F / runningCount;
-      float energyProxy = runningSum / -2.F / runningCount;
-      if (longTermMean > 0) {
-          longTermMean = energyProxy;
-      } else {
-          longTermMean = (energyProxy + longTermMean);
-      }
-      auto t1 = to_ms_since_boot(tNow);
-      float background = longTermMean / (periods + 1);
-      bool detection = energyProxy - background > 2;
-      if (periods > 1 && detection) {
-          printf("%8.2f %6.1f %6.1f    ", (t1 - t0) / 1000.F, background, energyProxy);
-          // Bin this into 3dB slots from -127
-          int nx = (energyProxy + 127.5F) / 3.F;
-          for (int i=0; i < nx; i++) { printf("*"); } printf("\n");
-      } else if (periods < 1) { 
-          printf("%8.2f %6.1f (initial integration)\n", (t1 - t0) / 1000.F, background);
-      }
-      tNextOutput = delayed_by_us(tNow, nextOutput_us);
-      runningSum = 0;
-      runningCount = 0;
-      periods ++;
+    if (time_reached(tNextSpectrograph)) {
+      spectrograph();
+      tNextSpectrograph = delayed_by_us(core0now, spectrographIntegation_us);
     }
   }
 }
