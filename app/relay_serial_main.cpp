@@ -49,8 +49,17 @@ typedef RingBuffer<DecodedMessageUnion_t, 15> RingBuffer_t;
 /// Ring buffer store for the message queue. This is a lock free buffer where core1 writes and core0 reads
 static RingBuffer_t decodedMessagesRingBuffer;
 
+/// Queue (FIFO) for pushing recent RSSI from Core0 to Core1 so that it can be associated with detection of a preamble
+queue_t rssiFifo;
+
 /// RSSI polling interval
 const int rssiPoll_us = 50;
+
+/// Recent RSSI queue size
+const int rssiFifoQueueLength = 20000 / rssiPoll_us;
+
+/// Recent RSSI queue elements to keep at least this many of
+const int rssiFifoQueueWatermark = 12000 / rssiPoll_us;
 
 /// RSSI spectrograph integration interval
 auto spectrographIntegation_us = ONE_SECOND_US / 4;
@@ -116,6 +125,8 @@ static void core1_main() {
   DecodedMessageUnion_t* msg = decodedMessagesRingBuffer.reserve(); // pre-start the ring buffer
   // fallback memory if the ring buffer is full: let message decoding still complete, so pulses are processed in order
   DecodedMessageUnion_t dummy;
+
+  bool preambleLatch = false;
   while (true) {
     // Idle at low power when not procesing
     __wfi();
@@ -142,11 +153,41 @@ static void core1_main() {
       msg = decodedMessagesRingBuffer.reserve();
       // If the buffer is full, we will lose this message (it will be NULL)
     }
+    TimestampedRssi_t rssi = { 0, 0 };
     bool decoded = manchesterHandler.nextPulse(pulseLength_us, now_us, msg ? *msg : dummy);
     if (decoded) {
+      // Scan for a peak. Max loop is 400
+      // We are looking at rssi values from eldest to newest
+      uint8_t rssiBytePeak = 255;
+      int scanned = 0;
+      while (true) {
+        if (!queue_try_remove(&rssiFifo, &rssi)) { break; }
+        if (rssiBytePeak > rssi.rssiByte) {
+          rssiBytePeak = rssi.rssiByte;
+        }
+        scanned++;
+        // TODO: sanity check timestamps?
+      }
+      if (msg) { msg->base.rssi = rssiBytePeak / -2.F; }
+
       // Make available for other core
       decodedMessagesRingBuffer.advance();
       msg = NULL;
+    } else {
+      // this will stay true until the message is reset...
+      bool preamble = manchesterHandler.maybePreamble();
+      // if (preamble) { if (!preambleLatch) { preambleLatch = true; printf("+\n"); } } else { preambleLatch = false; }
+      if (!preamble) {
+        // We get here if we have 12 lacrosse message bits or 16 oregon bits
+        // So, either 833*8 + 675*12 us or 16*1024us+preamble
+        // So if we sample 14msec of RSSI we should have a good idea
+        // flush stale RSSI values, provided we have at least 12msec in the queue
+        auto n = queue_get_level_unsafe(&rssiFifo);
+        // TODO - analyse if this potentially takes too long...
+        for (int i=rssiFifoQueueWatermark; i < n; i++) {
+          queue_try_remove(&rssiFifo, &rssi);
+        }
+      }
     }
   }
 }
@@ -159,16 +200,16 @@ void outuptDecoder(const DecodedMessageUnion_t* item) {
   switch (item->base.baseType) {
     case DecodedMessage_t::BaseType_t::OREGON: {
       const OregonSensorData_t& od = item->oregon;  
-      printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s\n", tb,
+      printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s,%.1f\n", tb,
         od.actualType, od.channel, od.rollingCode,
-        od.temp / 10.F, od.hum, od.battOK?"ok":"flat");
+        od.temp / 10.F, od.hum, od.battOK?"ok":"flat", item->base.rssi);
       break;
     }
 
     case DecodedMessage_t::BaseType_t::LACROSSE: {
       const LacrosseSensorData_t& d = item->lacrosse;
-      printf("Lacrosse,%d,%d,%.1f,%s\n", tb,
-        d.id, d.channel, (d.temp - 500.F) / 10.F, d.battOK?"ok":"flat");
+      printf("Lacrosse,%d,%d,%.1f,%s,%.1f\n", tb,
+        d.id, d.channel, (d.temp - 500.F) / 10.F, d.battOK?"ok":"flat", item->base.rssi);
       break;
     }
 
@@ -180,7 +221,7 @@ void outuptDecoder(const DecodedMessageUnion_t* item) {
       for (int i=0; i < ud.len; i++) {
         p = p + snprintf(p, hexdump + mx - p, "%02x", ud.bytes[i]);
       }
-      printf("%d,UNK,%s\n", tb, hexdump);
+      printf("%d,UNK,%s,%.1f\n", tb, hexdump, item->base.rssi);
       break;
     }
 
@@ -202,10 +243,10 @@ void core0_main(RFM69Radio& radio) {
   core0now = get_absolute_time();
   absolute_time_t tNextSpectrograph = delayed_by_us(core0now, spectrographIntegation_us);
   absolute_time_t tNextPoll = delayed_by_us(core0now, rssiPoll_us);
-  uint8_t rssi = 0;
 
   Spectrograph spectrograph;
-
+  TimestampedRssi_t rssi = { 0, 0 };
+  bool latchRssiQueueFull = false;
   while (true) {
 
     // This core is not so power efficient, we have to continually poll the timer and the ring buffer
@@ -221,15 +262,22 @@ void core0_main(RFM69Radio& radio) {
     }
 
     core0now = get_absolute_time();
+    auto tSinceBoot = to_ms_since_boot(core0now);
     if (time_reached(tNextPoll)) {
       tNextPoll = delayed_by_us(core0now, rssiPoll_us);
-      rssi = radio.readRSSIByte();
-      spectrograph.updateRssi(rssi);
+      rssi.rssiByte = radio.readRSSIByte();
+      rssi.t = tSinceBoot;
+      if (!queue_try_add(&rssiFifo, &rssi)) {
+        // if (!latchRssiQueueFull) { latchRssiQueueFull = true; printf("!\n"); }
+      } else {
+        latchRssiQueueFull = false;
+      }
+      spectrograph.updateRssi(rssi.rssiByte);
     }
 
     if (time_reached(tNextSpectrograph)) {
       // Capture the time the first time integrate() was called
-      static auto t0 = to_ms_since_boot(core0now);
+      static auto t0 = tSinceBoot;
       spectrograph.integrate();
       if (debugSpectrograph && !continuousSpectrograph && spectrograph.getDetection()) {
         displaySpectrographBar(spectrograph.getEnergy(), spectrograph.getBackground(), t0);
@@ -257,6 +305,13 @@ int main() {
     printf("Version=0x%02x\n", radio.getVersion());
     radio.enableReceiver();
     //radio.dumpRegisters();
+
+    // Push RSSI samples through to the other core
+    // We want to cover at least 12-14 milliseconds of message data to find a peak in RSSI
+    // So buffer that muchl Core1 will let it fill up, and then keep removing old values
+    // Once it has started detecting a message, then this FIFO should fill and data will be lost;
+    // and then core1 will flush it back again and sample for the peak
+    queue_init(&rssiFifo, sizeof(TimestampedRssi_t), rssiFifoQueueLength);
 
     multicore_launch_core1(core1_main);
     core0_main(radio);

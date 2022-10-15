@@ -21,6 +21,11 @@ public:
 
   ManchesterHandler() { }
 
+  /// Return heuristic we may have found a preamble, used for rssi association
+  bool maybePreamble() const { 
+    return oregonV2Decoder_.getBits() > 16 || lacrosseDecoder_.getBits() > 8; 
+  }
+
   /// This should be called from the main loop with the most recent pulse length in microseconds.
   /// This class maintains state, so this method when called consecutively for every edge detected,
   /// it will eventually detect and decode an entire frame if received.

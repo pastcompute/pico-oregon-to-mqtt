@@ -33,12 +33,15 @@ struct DecodedMessage_t {
 
   bool isTruncated;                       ///< If this was an unknown message, and len > MAX_RAW_MESSAGE_BYTES
 
+  float rssi;
+
   static void init(DecodedMessage_t& obj, BaseType_t baseType, const uint8_t* bytes, uint8_t len, uint64_t t_us) {
     assert(baseType > UNDEFINED && baseType < BASETYPE_MAX);
     obj.baseType = baseType;
     obj.rawTime_us = t_us;
     obj.len = len;
     obj.isTruncated = len > MAX_RAW_MESSAGE_BYTES;
+    obj.rssi = -128.F;
     std::copy(bytes, bytes + std::min(len, (uint8_t)MAX_RAW_MESSAGE_BYTES), obj.bytes);
   }
 };
