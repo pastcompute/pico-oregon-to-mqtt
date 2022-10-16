@@ -16,16 +16,35 @@
 #include <pico/stdlib.h>
 #include <algorithm>
 
+/// Oregon-specific protocol message data
+/// The value of DecodedMessage_t::baseType should be set to BaseType_t::OREGON
+struct OregonSensorData_t {
+  uint16_t actualType;
+  uint8_t channel;
+  // Note that the "rolling code" is BCD...
+  uint8_t rollingCode;
+  int16_t temp;
+  uint8_t hum;
+  bool battOK;
+};
+
+/// Lacrosse-specific protocol message data
+/// The value of DecodedMessage_t::baseType should be set to BaseType_t::LACROSSE
+struct LacrosseSensorData_t {
+  uint8_t id;
+  uint8_t channel;
+  int16_t temp;
+  bool battOK;
+};
+
 /// Common fields for our queued messages.
 /// Specific decoded types derive from this.
 
 struct DecodedMessage_t {
   enum : uint8_t { MAX_RAW_MESSAGE_BYTES = 100 };
 
-  // Because we are using standard-layout, we need to independently keep track of what kind of object this is
   enum BaseType_t : uint8_t { UNDEFINED = 0, UNDECODED, OREGON, LACROSSE, BASETYPE_MAX };
 
-  /// Due to standard-layout compliance, this will be in the same location in the union regardless of what type
   BaseType_t baseType; 
 
   uint64_t rawTime_us;                    ///< value of time_us_64() at start of the IRQ handler for the last pulse when
@@ -37,8 +56,14 @@ struct DecodedMessage_t {
   float rssi;                             ///< RSSI associated with the message, as peak in last ~12ms after the preamble
   uint32_t uniqueCount;                   ///< Ordered number of this message for the given type, added after deduplication
 
-  template<typename T>
-  static T makeUndefined() { T o; o.baseType = UNDEFINED; return o; }
+  // This union ensures that each slot in the ring buffer will be the same size and large enough to hold any type
+  // Whether these hold data depends on the value of baseType
+  union {
+    OregonSensorData_t oregon;
+    LacrosseSensorData_t lacrosse;
+  };
+
+  static DecodedMessage_t makeUndefined() { DecodedMessage_t o = { .baseType = UNDEFINED, .rawTime_us = 0 }; return o; }
 
   static void init(DecodedMessage_t& obj, BaseType_t baseType, const uint8_t* bytes, uint8_t len, uint64_t t_us) {
     assert(baseType > UNDEFINED && baseType < BASETYPE_MAX);
@@ -50,56 +75,29 @@ struct DecodedMessage_t {
     obj.uniqueCount = 0;
     std::copy(bytes, bytes + std::min(len, (uint8_t)MAX_RAW_MESSAGE_BYTES), obj.bytes);
   }
-};
-
-/// This stucture holds decoded Oregon protocol message data
-/// The value of DecodedMessage_t::baseType should be set to BaseType_t::OREGON or this data will be ignored
-struct OregonSensorData_t : public DecodedMessage_t {
-  uint16_t actualType;
-  uint8_t channel;
-  // Note that the "rolling code" is BCD...
-  uint8_t rollingCode;
-  int16_t temp;
-  uint8_t hum;
-  bool battOK;
-};
-
-struct LacrosseSensorData_t : public DecodedMessage_t {
-  uint8_t id;
-  uint8_t channel;
-  int16_t temp;
-  bool battOK;
-};
-
-/// This next structure provides the fixed size array element used for allocating messages in the ring buffer
-/// This also requires standard-layout
-union DecodedMessageUnion_t {
-  DecodedMessage_t base;
-  OregonSensorData_t oregon;
-  LacrosseSensorData_t lacrosse;
-};
 
 // Check if a message is one of a series of duplicate messages sent in a burst
-template<typename T>
-bool isRecentDupe(const T& d, uint32_t interval_us) {
-  static T recent = DecodedMessage_t::makeUndefined<T>();
-  auto dt = d.rawTime_us - recent.rawTime_us; // WARNING: NOT WRAP SAFE
+// Note, this will get confused in the unlikely event we get to contemporaneous bursts of
+// messages from different sensors. We could in theory fix this using a hashmap for recent
+// with a key of the basetype... but for the common case this gets the job done
+static bool isRecentDupe(const DecodedMessage_t& next, uint32_t interval_us) {
+  static auto recent = DecodedMessage_t::makeUndefined();
+  auto dt = next.rawTime_us - recent.rawTime_us;
   bool dupe = false;
-  if (recent.baseType != DecodedMessage_t::BaseType_t::UNDEFINED && dt < interval_us) {
+  if (dt < interval_us && recent.baseType != DecodedMessage_t::BaseType_t::UNDEFINED) {
     // prior message is within 0.5 second, probably duplicate.
     // But a better check is also to compare the data, so do that to be sure
-    dupe = true;
-    for (int i=0; i < d.len; i++) {
-      if (d.bytes[i] != recent.bytes[i]) {
-        dupe = false;
-      }
-    }
+    dupe = next.len == recent.len && std::equal(next.bytes, next.bytes + next.len, recent.bytes);
   }
   if (!dupe) {
-    recent = d;
+    recent = next;
   }
   return dupe;
 }
+
+};
+
+static_assert(std::is_standard_layout<DecodedMessage_t>::value);
 
 /// This structure holds data shared between the dio2 interrupt handler and the second core main loop.
 struct Dio2SharedData_t {

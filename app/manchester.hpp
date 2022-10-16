@@ -31,7 +31,7 @@ public:
   /// it will eventually detect and decode an entire frame if received.
   /// When a frame was succesfully decoded, it will be stored into the passed msg reference.
   /// @return  false if no completed frame was detected; true if a message completed decoding
-  bool nextPulse(uint32_t pulseLength_us, uint64_t now_us, DecodedMessageUnion_t& msg) {
+  bool nextPulse(uint32_t pulseLength_us, uint64_t now_us, DecodedMessage_t& msg) {
     // Try each decoder in turn, see if we have captured a complete message
     if (oregonV2Decoder_.nextPulse(pulseLength_us)) {
       // OK, see if we can decode it to something we know
@@ -64,14 +64,14 @@ public:
 
 private:
 
-  bool decodeLacrosse(uint64_t now_us, DecodedMessageUnion_t& msg) {
+  bool decodeLacrosse(uint64_t now_us, DecodedMessage_t& msg) {
     uint8_t len;
     auto data = lacrosseDecoder_.getData(len);
     if (!data) { return false; }
     if (debugMessageHex) { dumpMessageHex(data, len); }
 
     // Prepare the common data and initialise to unknown
-    DecodedMessage_t::init(msg.base, DecodedMessage_t::BaseType_t::UNDECODED, data, len, now_us);
+    DecodedMessage_t::init(msg, DecodedMessage_t::BaseType_t::UNDECODED, data, len, now_us);
 
     uint8_t id = fliplr(data[0]);
     bool batt = data[1] & 0b1;
@@ -80,7 +80,7 @@ private:
     uint16_t temp = (b1 & 0xf) << 8 | b2;
     uint8_t channel =  (b1 & 0x30) >> 4;
 
-    msg.base.baseType = DecodedMessage_t::BaseType_t::LACROSSE;
+    msg.baseType = DecodedMessage_t::BaseType_t::LACROSSE;
     msg.lacrosse.battOK = batt;
     msg.lacrosse.channel = channel;
     msg.lacrosse.id = id;
@@ -89,27 +89,23 @@ private:
     return true;
   }
 
-  bool decodeV2(uint64_t now_us, DecodedMessageUnion_t& msg) {
+  bool decodeV2(uint64_t now_us, DecodedMessage_t& msg) {
     uint8_t len;
     auto data = oregonV2Decoder_.getData(len);
     if (!data) { return false; }
     if (debugMessageHex) { dumpMessageHex(data, len); }
 
     // Prepare the common data and initialise to unknown
-    DecodedMessage_t::init(msg.base, DecodedMessage_t::BaseType_t::UNDECODED, data, len, now_us);
+    DecodedMessage_t::init(msg, DecodedMessage_t::BaseType_t::UNDECODED, data, len, now_us);
 
     // Try for a temperature / humidity sensor
     if (protocol_.decodeTempHumidity(data, len,
           msg.oregon.actualType, msg.oregon.channel, msg.oregon.rollingCode,
           msg.oregon.temp, msg.oregon.hum, msg.oregon.battOK)) {
       // yes, it is
-      msg.base.baseType = DecodedMessage_t::BaseType_t::OREGON;
+      msg.baseType = DecodedMessage_t::BaseType_t::OREGON;
       return true;
     }
-    return false;
-  }
-
-  bool decodeV3(uint64_t now_us, DecodedMessageUnion_t& msg) {
     return false;
   }
 };

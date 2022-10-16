@@ -46,7 +46,7 @@ static bool continuousSpectrograph = false;
 /// Allocate a fixed ring buffer that can hold up to 15 elements
 /// Until we implement message merging in the decoder in Core1,
 /// this lets us cope with a Lacross that repeats a message 12 times happening at the same time as an oregon (etc)
-typedef RingBuffer<DecodedMessageUnion_t, 15> RingBuffer_t;
+typedef RingBuffer<DecodedMessage_t, 15> RingBuffer_t;
 
 /// Ring buffer store for the message queue. This is a lock free buffer where core1 writes and core0 reads
 static RingBuffer_t decodedMessagesRingBuffer;
@@ -130,9 +130,9 @@ static void core1_main() {
   ManchesterHandler manchesterHandler;
   manchesterHandler.debugMessageHex = debugMessageHex;
 
-  DecodedMessageUnion_t* msg = decodedMessagesRingBuffer.reserve(); // pre-start the ring buffer
+  DecodedMessage_t* msg = decodedMessagesRingBuffer.reserve(); // pre-start the ring buffer
   // fallback memory if the ring buffer is full: let message decoding still complete, so pulses are processed in order
-  DecodedMessageUnion_t dummy;
+  DecodedMessage_t dummy;
 
   bool preambleLatch = false;
   while (true) {
@@ -178,7 +178,7 @@ static void core1_main() {
         scanned++;
         // Should we sanity check the timestamps, if they are too far out, then ignore?
       }
-      if (msg) { msg->base.rssi = rssiBytePeak / -2.F; }
+      if (msg) { msg->rssi = rssiBytePeak / -2.F; }
       // Make the completed message available for other core
       decodedMessagesRingBuffer.advance();
       // Turn LED on, other core will turn it off 250ms after it processes it
@@ -203,48 +203,48 @@ static void core1_main() {
   }
 }
 
-void outuptDecoder(const DecodedMessageUnion_t* item) {
+void outuptDecoder(const DecodedMessage_t& item) {
   absolute_time_t t;
-  update_us_since_boot(&t, item->base.rawTime_us);
+  update_us_since_boot(&t, item.rawTime_us);
   uint32_t tb = to_ms_since_boot(t);
 
-  switch (item->base.baseType) {
+  switch (item.baseType) {
     case DecodedMessage_t::BaseType_t::OREGON: {
-      const OregonSensorData_t& d = item->oregon;
+      const OregonSensorData_t& d = item.oregon;
       static int count = 0;
       // static auto tFirst = tb;
-      bool dupe = isRecentDupe(d, 750000);
+      bool dupe = item.isRecentDupe(item, 750000);
       if (!dupe) {
         count++;
         printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s,%.1f,%d\n", tb,
-          d.actualType, d.channel, d.rollingCode, d.temp / 10.F, d.hum, d.battOK?"ok":"flat", d.rssi, count); //,(tb - tFirst)/39000.F+1.F);
+          d.actualType, d.channel, d.rollingCode, d.temp / 10.F, d.hum, d.battOK?"ok":"flat", item.rssi, count); //,(tb - tFirst)/39000.F+1.F);
       }
       break;
     }
 
     case DecodedMessage_t::BaseType_t::LACROSSE: {
       // These come in bursts of up to 12... filter out recent duplicates
-      const LacrosseSensorData_t& d = item->lacrosse;
+      const LacrosseSensorData_t& d = item.lacrosse;
       static int count = 0;
       // static auto tFirst = tb; // attempt to compute cadence so we can estimate if we missed messages. But this is subtype dependent...
-      bool dupe = isRecentDupe(d, 750000);
+      bool dupe = item.isRecentDupe(item, 750000);
       if (!dupe) {
         count++;
         printf("Lacrosse,%d,%d,%.1f,%s,%.1f,%d\n", tb,
-          d.id, d.channel, (d.temp - 500.F) / 10.F, d.battOK?"ok":"flat", d.rssi, count); //, d.id==182?(tb-tFirst)/77000.F+1.F:(tb-tFirst)/57000.F+1.F);
+          d.id, d.channel, (d.temp - 500.F) / 10.F, d.battOK?"ok":"flat", item.rssi, count); //, d.id==182?(tb-tFirst)/77000.F+1.F:(tb-tFirst)/57000.F+1.F);
       }
       break;
     }
 
     case DecodedMessage_t::BaseType_t::UNDECODED: {
-      const DecodedMessage_t& ud = item->base;
+      const DecodedMessage_t& ud = item;
       size_t mx = ud.len * 2 + 1;
       char hexdump[mx];
       char*p = hexdump;
       for (int i=0; i < ud.len; i++) {
         p = p + snprintf(p, hexdump + mx - p, "%02x", ud.bytes[i]);
       }
-      printf("%d,UNK,%s,%.1f\n", tb, hexdump, item->base.rssi);
+      printf("%d,UNK,%s,%.1f\n", tb, hexdump, item.rssi);
       break;
     }
 
@@ -282,7 +282,7 @@ void core0_main(RFM69Radio& radio) {
     if (tail) {
       decodedMessagesRingBuffer.pop(); // release a slot ASAP
       if (!continuousSpectrograph) {
-        outuptDecoder(tail);
+        outuptDecoder(*tail);
       }
     }
 
