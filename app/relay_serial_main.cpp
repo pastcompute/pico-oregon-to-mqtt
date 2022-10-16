@@ -31,6 +31,8 @@
 #include "manchester.hpp"
 #include "spectrograph.hpp"
 
+const uint LED_PIN = PICO_DEFAULT_LED_PIN;
+
 /// Set this to true to have the second core dump all decoded manchester in hex to the serial port.
 /// Note that unknown data is also output by core0
 static bool debugMessageHex = false;
@@ -67,6 +69,9 @@ struct TimestampedRssi_t {
   uint32_t t;
   uint8_t rssiByte;
 };
+
+// Flash LED for approx 0.5 seconds each new message. If it sticks on we had a hang in somewhere after posting
+const auto messageLedMinTime_us = ONE_SECOND_US / 2;
 
 /// This critical section protects data shared between the dio2 interrupt handler and the second core main loop.
 static critical_section_t dio2_crit;
@@ -172,6 +177,8 @@ static void core1_main() {
 
       // Make available for other core
       decodedMessagesRingBuffer.advance();
+      // Turn LED on, other core will turn it off
+      gpio_put(LED_PIN, 1);
       msg = NULL;
     } else {
       // this will stay true until the message is reset...
@@ -243,10 +250,12 @@ void core0_main(RFM69Radio& radio) {
   core0now = get_absolute_time();
   absolute_time_t tNextSpectrograph = delayed_by_us(core0now, spectrographIntegation_us);
   absolute_time_t tNextPoll = delayed_by_us(core0now, rssiPoll_us);
+  absolute_time_t tNextLEDCheck = delayed_by_us(core0now, messageLedMinTime_us);
 
   Spectrograph spectrograph;
   TimestampedRssi_t rssi = { 0, 0 };
   bool latchRssiQueueFull = false;
+  bool needToTurnOffLed = true;
   while (true) {
 
     // This core is not so power efficient, we have to continually poll the timer and the ring buffer
@@ -263,6 +272,18 @@ void core0_main(RFM69Radio& radio) {
 
     core0now = get_absolute_time();
     auto tSinceBoot = to_ms_since_boot(core0now);
+
+    if (tail) {
+      // if LED had been hopefully turned on, schedule to turn it off
+      tNextLEDCheck = delayed_by_us(core0now, messageLedMinTime_us);
+      // this is hacky we should use an alarm instead
+      needToTurnOffLed = true;
+    }
+    if (needToTurnOffLed && time_reached(tNextLEDCheck)) {
+      gpio_put(LED_PIN, 0);
+      needToTurnOffLed = false;
+    }
+
     if (time_reached(tNextPoll)) {
       tNextPoll = delayed_by_us(core0now, rssiPoll_us);
       rssi.rssiByte = radio.readRSSIByte();
@@ -290,6 +311,14 @@ void core0_main(RFM69Radio& radio) {
 }
 
 int main() {
+    // Turn LED on
+    const uint LED_PIN = PICO_DEFAULT_LED_PIN;
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+    gpio_put(LED_PIN, 1);
+    sleep_ms(250);
+    gpio_put(LED_PIN, 0);
+
     stdio_init_all();
     printf("\n\nCore0: Pico Oregon Serial Relay\n");
 
@@ -305,6 +334,12 @@ int main() {
     printf("Version=0x%02x\n", radio.getVersion());
     radio.enableReceiver();
     //radio.dumpRegisters();
+
+    // Turn LED on a second time, if we got to here
+    sleep_ms(250);
+    gpio_put(LED_PIN, 1);
+    sleep_ms(250);
+    gpio_put(LED_PIN, 0);
 
     // Push RSSI samples through to the other core
     // We want to cover at least 12-14 milliseconds of message data to find a peak in RSSI
