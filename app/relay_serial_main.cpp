@@ -54,14 +54,19 @@ static RingBuffer_t decodedMessagesRingBuffer;
 /// Queue (FIFO) for pushing recent RSSI from Core0 to Core1 so that it can be associated with detection of a preamble
 queue_t rssiFifo;
 
+// The larger this can be and still work, the less time is used in processing
+// although there could be a miss in the peak read from the sx1231
+
 /// RSSI polling interval
-const int rssiPoll_us = 50;
+const int rssiPoll_us = 100;
+
+// The smaller these can be and still work, the shorter the time to flush
 
 /// Recent RSSI queue size
-const int rssiFifoQueueLength = 20000 / rssiPoll_us;
+const int rssiFifoQueueLength = 16000 / rssiPoll_us;
 
 /// Recent RSSI queue elements to keep at least this many of
-const int rssiFifoQueueWatermark = 12000 / rssiPoll_us;
+const int rssiFifoQueueWatermark = 10000 / rssiPoll_us;
 
 /// RSSI spectrograph integration interval
 auto spectrographIntegation_us = ONE_SECOND_US / 4;
@@ -239,7 +244,7 @@ void outuptDecoder(const DecodedMessageUnion_t* item) {
 }
 
 void displaySpectrographBar(float energy, float background, uint32_t t0) {
-  printf("%8.2f %6.1f %6.1f    ", (to_ms_since_boot(core0now) - t0) / 1000.F, background, energy);
+  printf("Spectro,%8.2f %6.1f %6.1f    ", (to_ms_since_boot(core0now) - t0) / 1000.F, background, energy);
     // Bin this into 3dB slots from -127
     int nx = (energy + 127.5F) / 3.F;
     for (int i=0; i < nx; i++) { printf("*"); } printf("\n");
