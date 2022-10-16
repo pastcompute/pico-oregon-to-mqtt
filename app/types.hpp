@@ -35,6 +35,9 @@ struct DecodedMessage_t {
 
   float rssi;
 
+  template<typename T>
+  static T makeUndefined() { T o; o.baseType = UNDEFINED; return o; }
+
   static void init(DecodedMessage_t& obj, BaseType_t baseType, const uint8_t* bytes, uint8_t len, uint64_t t_us) {
     assert(baseType > UNDEFINED && baseType < BASETYPE_MAX);
     obj.baseType = baseType;

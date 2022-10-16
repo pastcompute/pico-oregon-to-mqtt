@@ -204,6 +204,26 @@ static void core1_main() {
   }
 }
 
+template<typename T>
+bool isRecentDupe(const T& d, uint32_t interval_us) {
+  static T recent = DecodedMessage_t::makeUndefined<T>();
+  auto dt = d.rawTime_us - recent.rawTime_us; // WARNING: NOT WRAP SAFE
+  bool dupe = false;
+  if (recent.baseType != DecodedMessage_t::BaseType_t::UNDEFINED && dt < interval_us) {
+    // prior message is within 0.5 second, probably duplicat. But a better check is also to compare the data
+    dupe = true;
+    for (int i=0; i < d.len; i++) {
+      if (d.bytes[i] != recent.bytes[i]) {
+        dupe = false;
+      }
+    }
+  }
+  if (!dupe) {
+    recent = d;
+  }
+  return dupe;
+}
+
 void outuptDecoder(const DecodedMessageUnion_t* item) {
   absolute_time_t t;
   update_us_since_boot(&t, item->base.rawTime_us);
@@ -211,17 +231,29 @@ void outuptDecoder(const DecodedMessageUnion_t* item) {
 
   switch (item->base.baseType) {
     case DecodedMessage_t::BaseType_t::OREGON: {
-      const OregonSensorData_t& od = item->oregon;  
-      printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s,%.1f\n", tb,
-        od.actualType, od.channel, od.rollingCode,
-        od.temp / 10.F, od.hum, od.battOK?"ok":"flat", item->base.rssi);
+      const OregonSensorData_t& d = item->oregon;
+      static int count = 0;
+      // static auto tFirst = tb;
+      bool dupe = isRecentDupe(d, 750000);
+      if (!dupe) {
+        count++;
+        printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s,%.1f,%d\n", tb,
+          d.actualType, d.channel, d.rollingCode, d.temp / 10.F, d.hum, d.battOK?"ok":"flat", d.rssi, count); //,(tb - tFirst)/39000.F+1.F);
+      }
       break;
     }
 
     case DecodedMessage_t::BaseType_t::LACROSSE: {
+      // These come in bursts of up to 12... filter out recent duplicates
       const LacrosseSensorData_t& d = item->lacrosse;
-      printf("Lacrosse,%d,%d,%.1f,%s,%.1f\n", tb,
-        d.id, d.channel, (d.temp - 500.F) / 10.F, d.battOK?"ok":"flat", item->base.rssi);
+      static int count = 0;
+      // static auto tFirst = tb; // attempt to compute cadence so we can estimate if we missed messages. But this is subtype dependent...
+      bool dupe = isRecentDupe(d, 750000);
+      if (!dupe) {
+        count++;
+        printf("Lacrosse,%d,%d,%.1f,%s,%.1f,%d\n", tb,
+          d.id, d.channel, (d.temp - 500.F) / 10.F, d.battOK?"ok":"flat", d.rssi, count); //, d.id==182?(tb-tFirst)/77000.F+1.F:(tb-tFirst)/57000.F+1.F);
+      }
       break;
     }
 
