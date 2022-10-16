@@ -9,7 +9,8 @@
 /// one short, but we can just size accordingly if that becomes a problem.
 /// This is intended to be lock free, so we dont need to waste a critical section to access it
 /// HOWEVER this requires the index type to fix in an atomic register of the processor!
-/// AND there b only a single thread pushing and another single thread popping 
+/// AND there b only a single thread pushing and another single thread popping
+/// In an abundance of caution ELEMENT should be a standard layout class
 template<typename ELEMENT, int NUM_ELEMENTS, typename INDEX_TYPE = uint8_t>
 class RingBuffer {
 public:

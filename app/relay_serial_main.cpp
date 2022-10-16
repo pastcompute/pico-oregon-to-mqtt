@@ -89,11 +89,7 @@ static absolute_time_t core0now;
 
 /// RFM69 SX1231 dio2 Interrupt handler
 extern "C" void dio2InterruptHandler() {
-  // this may not handle wrap, but I think we can ignore that for the moment
-  // it means we may get one edge with a massive size, at 2^64/10^6 seconds after power on
-  // and we can live with corrupting potentially one message on such a timeframe
   auto now = time_us_64();
-
   auto mask = gpio_get_irq_event_mask(RFM69_DIO2);
   if (mask & GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL) {
       gpio_acknowledge_irq(RFM69_DIO2, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL);
@@ -105,6 +101,8 @@ extern "C" void dio2InterruptHandler() {
   static uint64_t prevTime_us = 0;
   critical_section_enter_blocking(&dio2_crit);
   sharedData.now = now;
+  // nb. this wont handle wrap, but I dont think we have to worry about what happens in 584924 years time...
+  // OTOH, nextPulseLength_us will overflow after 4295 seconds, but that can also be disregarded
   sharedData.nextPulseLength_us = now - prevTime_us;
   sharedData.edgesCount++;
   sharedData.fallingEdge = mask & GPIO_IRQ_EDGE_FALL;
@@ -157,7 +155,8 @@ static void core1_main() {
     }
 
     // Every edge, try and decode a message
-    // We have around 400 uS to get this done, worst case, when processing valid Oregon messages
+    // We have around ~400 uS to get this done, worst case, when processing valid Oregon messages
+    // and ~200uS for Lacrosse messages
     // The decoder fails as soon as it can
     if (!msg) {
       msg = decodedMessagesRingBuffer.reserve();
@@ -166,8 +165,9 @@ static void core1_main() {
     TimestampedRssi_t rssi = { 0, 0 };
     bool decoded = manchesterHandler.nextPulse(pulseLength_us, now_us, msg ? *msg : dummy);
     if (decoded) {
-      // Scan for a peak. Max loop is 400
+      // Scan for a peak for likely the most recent 400-odd samples ; we will assign it to the current message
       // We are looking at rssi values from eldest to newest
+      // Note, there is an edge case if we had two messages very near to each other, the wrong or no rssi might be assigned
       uint8_t rssiBytePeak = 255;
       int scanned = 0;
       while (true) {
@@ -176,17 +176,16 @@ static void core1_main() {
           rssiBytePeak = rssi.rssiByte;
         }
         scanned++;
-        // TODO: sanity check timestamps?
+        // Should we sanity check the timestamps, if they are too far out, then ignore?
       }
       if (msg) { msg->base.rssi = rssiBytePeak / -2.F; }
-
-      // Make available for other core
+      // Make the completed message available for other core
       decodedMessagesRingBuffer.advance();
-      // Turn LED on, other core will turn it off
+      // Turn LED on, other core will turn it off 250ms after it processes it
       gpio_put(LED_PIN, 1);
       msg = NULL;
     } else {
-      // this will stay true until the message is reset...
+      // this will stay true until the message is reset... which wont be long if this was not actually a valid preamble
       bool preamble = manchesterHandler.maybePreamble();
       // if (preamble) { if (!preambleLatch) { preambleLatch = true; printf("+\n"); } } else { preambleLatch = false; }
       if (!preamble) {
@@ -202,26 +201,6 @@ static void core1_main() {
       }
     }
   }
-}
-
-template<typename T>
-bool isRecentDupe(const T& d, uint32_t interval_us) {
-  static T recent = DecodedMessage_t::makeUndefined<T>();
-  auto dt = d.rawTime_us - recent.rawTime_us; // WARNING: NOT WRAP SAFE
-  bool dupe = false;
-  if (recent.baseType != DecodedMessage_t::BaseType_t::UNDEFINED && dt < interval_us) {
-    // prior message is within 0.5 second, probably duplicat. But a better check is also to compare the data
-    dupe = true;
-    for (int i=0; i < d.len; i++) {
-      if (d.bytes[i] != recent.bytes[i]) {
-        dupe = false;
-      }
-    }
-  }
-  if (!dupe) {
-    recent = d;
-  }
-  return dupe;
 }
 
 void outuptDecoder(const DecodedMessageUnion_t* item) {

@@ -6,7 +6,9 @@
 /// using a pre-allocated array of fixed sized objects. As we dont generally to expect to get overwhelmed with messages
 /// (the THD122 sends 2 successive messages every 39 seconds, and we dont expect to have too many devices at once)
 /// the queue and the array dont need to be huge.
-/// We also adhere to C++ standard-layout semantics
+///
+/// For message types (in the ring buffer) we adhere to C++ standard-layout semantics (no virtual, etc), to ensure when selecting
+/// a message out of the union used for fixed memory sizing the base type data is in the correct memory location
 
 #ifndef POTM_TYPES_H_
 #define POTM_TYPES_H_
@@ -23,17 +25,17 @@ struct DecodedMessage_t {
   // Because we are using standard-layout, we need to independently keep track of what kind of object this is
   enum BaseType_t : uint8_t { UNDEFINED = 0, UNDECODED, OREGON, LACROSSE, BASETYPE_MAX };
 
+  /// Due to standard-layout compliance, this will be in the same location in the union regardless of what type
   BaseType_t baseType; 
 
   uint64_t rawTime_us;                    ///< value of time_us_64() at start of the IRQ handler for the last pulse when
                                           ///< the message was complete
-
   uint8_t len;                            ///< Number of raw decoded bytes that was decoded
   uint8_t bytes[MAX_RAW_MESSAGE_BYTES];   ///< Raw decoded bytes (may be truncated)
 
   bool isTruncated;                       ///< If this was an unknown message, and len > MAX_RAW_MESSAGE_BYTES
-
-  float rssi;
+  float rssi;                             ///< RSSI associated with the message, as peak in last ~12ms after the preamble
+  uint32_t uniqueCount;                   ///< Ordered number of this message for the given type, added after deduplication
 
   template<typename T>
   static T makeUndefined() { T o; o.baseType = UNDEFINED; return o; }
@@ -45,6 +47,7 @@ struct DecodedMessage_t {
     obj.len = len;
     obj.isTruncated = len > MAX_RAW_MESSAGE_BYTES;
     obj.rssi = -128.F;
+    obj.uniqueCount = 0;
     std::copy(bytes, bytes + std::min(len, (uint8_t)MAX_RAW_MESSAGE_BYTES), obj.bytes);
   }
 };
@@ -69,11 +72,34 @@ struct LacrosseSensorData_t : public DecodedMessage_t {
 };
 
 /// This next structure provides the fixed size array element used for allocating messages in the ring buffer
+/// This also requires standard-layout
 union DecodedMessageUnion_t {
   DecodedMessage_t base;
   OregonSensorData_t oregon;
   LacrosseSensorData_t lacrosse;
 };
+
+// Check if a message is one of a series of duplicate messages sent in a burst
+template<typename T>
+bool isRecentDupe(const T& d, uint32_t interval_us) {
+  static T recent = DecodedMessage_t::makeUndefined<T>();
+  auto dt = d.rawTime_us - recent.rawTime_us; // WARNING: NOT WRAP SAFE
+  bool dupe = false;
+  if (recent.baseType != DecodedMessage_t::BaseType_t::UNDEFINED && dt < interval_us) {
+    // prior message is within 0.5 second, probably duplicate.
+    // But a better check is also to compare the data, so do that to be sure
+    dupe = true;
+    for (int i=0; i < d.len; i++) {
+      if (d.bytes[i] != recent.bytes[i]) {
+        dupe = false;
+      }
+    }
+  }
+  if (!dupe) {
+    recent = d;
+  }
+  return dupe;
+}
 
 /// This structure holds data shared between the dio2 interrupt handler and the second core main loop.
 struct Dio2SharedData_t {
