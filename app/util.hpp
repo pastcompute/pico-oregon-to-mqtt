@@ -33,4 +33,14 @@ inline void dumpMessageHex(const uint8_t* data, uint8_t len, bool flip=false) {
   printf("\n");
 }
 
+inline std::string bytesToHex(const uint8_t* data, uint8_t len) {
+  size_t mx = len * 2 + 1;
+  char hexdump[mx];
+  char *p = hexdump;
+  for (int i=0; i < len; i++) {
+    p = p + snprintf(p, hexdump + mx - p, "%02x", data[i]);
+  }
+  return std::string(hexdump);
+}
+
 #endif

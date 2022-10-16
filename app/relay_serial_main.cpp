@@ -43,6 +43,17 @@ static bool debugSpectrograph = true;
 /// Set this to true to suppress decoder output and instead stream continuous spectrograph
 static bool continuousSpectrograph = false;
 
+/// Global statistical information
+static struct Stats_t {
+  uint32_t rawCount;
+  uint32_t perTypeUniqueCount[DecodedMessage_t::BASETYPE_MAX];
+
+  Stats_t() {
+    rawCount = 0;
+    std::fill(perTypeUniqueCount, perTypeUniqueCount + DecodedMessage_t::BASETYPE_MAX, 0);
+  }
+} stats;
+
 /// Allocate a fixed ring buffer that can hold up to 15 elements
 /// Until we implement message merging in the decoder in Core1,
 /// this lets us cope with a Lacross that repeats a message 12 times happening at the same time as an oregon (etc)
@@ -203,55 +214,48 @@ static void core1_main() {
   }
 }
 
-void outuptDecoder(const DecodedMessage_t& item) {
-  absolute_time_t t;
-  update_us_since_boot(&t, item.rawTime_us);
-  uint32_t tb = to_ms_since_boot(t);
-
-  switch (item.baseType) {
-    case DecodedMessage_t::BaseType_t::OREGON: {
-      const OregonSensorData_t& d = item.oregon;
-      static int count = 0;
-      // static auto tFirst = tb;
-      bool dupe = item.isRecentDupe(item, 750000);
-      if (!dupe) {
-        count++;
-        printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s,%.1f,%d\n", tb,
-          d.actualType, d.channel, d.rollingCode, d.temp / 10.F, d.hum, d.battOK?"ok":"flat", item.rssi, count); //,(tb - tFirst)/39000.F+1.F);
-      }
+/// Output a message in psuedo-CSV format on serial port (to host)
+void displayMessage(const EnrichedMessage_t& msg) {
+  switch(msg.baseType) {
+    case EnrichedMessage_t::BaseType_t::OREGON:
+      printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s,%.1f,%d\n", msg.timestamp_ms,
+          msg.oregon.actualType, msg.oregon.channel, msg.oregon.rollingCode, msg.oregon.temp / 10.F, msg.oregon.hum,
+          msg.oregon.battOK?"ok":"flat", msg.rssi, msg.count);
       break;
-    }
 
-    case DecodedMessage_t::BaseType_t::LACROSSE: {
-      // These come in bursts of up to 12... filter out recent duplicates
-      const LacrosseSensorData_t& d = item.lacrosse;
-      static int count = 0;
-      // static auto tFirst = tb; // attempt to compute cadence so we can estimate if we missed messages. But this is subtype dependent...
-      bool dupe = item.isRecentDupe(item, 750000);
-      if (!dupe) {
-        count++;
-        printf("Lacrosse,%d,%d,%.1f,%s,%.1f,%d\n", tb,
-          d.id, d.channel, (d.temp - 500.F) / 10.F, d.battOK?"ok":"flat", item.rssi, count); //, d.id==182?(tb-tFirst)/77000.F+1.F:(tb-tFirst)/57000.F+1.F);
-      }
+    case EnrichedMessage_t::BaseType_t::LACROSSE:
+      printf("Lacrosse,%d,%d,%.1f,%s,%.1f,%d\n", msg.timestamp_ms,
+        msg.lacrosse.id, msg.lacrosse.channel, (msg.lacrosse.temp - 500.F) / 10.F,
+        msg.lacrosse.battOK?"ok":"flat", msg.rssi, msg.count);
       break;
-    }
 
-    case DecodedMessage_t::BaseType_t::UNDECODED: {
-      const DecodedMessage_t& ud = item;
-      size_t mx = ud.len * 2 + 1;
-      char hexdump[mx];
-      char*p = hexdump;
-      for (int i=0; i < ud.len; i++) {
-        p = p + snprintf(p, hexdump + mx - p, "%02x", ud.bytes[i]);
-      }
-      printf("%d,UNK,%s,%.1f\n", tb, hexdump, item.rssi);
+    case EnrichedMessage_t::BaseType_t::UNDECODED:
+      printf("%d,UNK,%s,%.1f\n", msg.timestamp_ms, bytesToHex(msg.bytes, msg.len).c_str(), msg.rssi);
       break;
-    }
 
     default:
       panic("Unknown type");
-      break;
   }
+}
+
+/// Handle a message popped from the ring buffer.
+/// Enrich with additional metadata (type count, converted time, etc.)
+void handleMessage(const DecodedMessage_t& decodedMessage) {
+  // Total count
+  stats.rawCount++;
+
+  // Discard if this is a duplicate in a burst
+  if (decodedMessage.isRecentDupe(decodedMessage, 750000)) { return; }
+
+  // Convert the raw interrupt time of the message
+  absolute_time_t t; update_us_since_boot(&t, decodedMessage.rawTime_us);
+  auto tb = to_ms_since_boot(t);
+
+  // Update the per-type count of the message
+  auto count = ++stats.perTypeUniqueCount[decodedMessage.baseType];
+
+  EnrichedMessage_t message(decodedMessage, count, tb);
+  displayMessage(message);
 }
 
 void displaySpectrographBar(float energy, float background, uint32_t t0) {
@@ -278,18 +282,16 @@ void core0_main(RFM69Radio& radio) {
     // A slightly more efficient design would have core1 signal core0 to wake up and check the ring buffer
     // but we would need to also integrate that with alarms
 
-    auto tail = decodedMessagesRingBuffer.peek();
-    if (tail) {
-      decodedMessagesRingBuffer.pop(); // release a slot ASAP
-      if (!continuousSpectrograph) {
-        outuptDecoder(*tail);
-      }
-    }
-
     core0now = get_absolute_time();
     auto tSinceBoot = to_ms_since_boot(core0now);
 
+    auto tail = decodedMessagesRingBuffer.peek();
     if (tail) {
+      decodedMessagesRingBuffer.pop(); // release a slot ASAP
+      handleMessage(*tail);
+      // if (!continuousSpectrograph) {
+      //   outuptDecoder(*tail);
+      // }
       // if LED had been hopefully turned on, schedule to turn it off
       tNextLEDCheck = delayed_by_us(core0now, messageLedMinTime_us);
       // this is hacky we should use an alarm instead

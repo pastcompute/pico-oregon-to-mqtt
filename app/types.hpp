@@ -47,14 +47,13 @@ struct DecodedMessage_t {
 
   BaseType_t baseType; 
 
-  uint64_t rawTime_us;                    ///< value of time_us_64() at start of the IRQ handler for the last pulse when
+  uint64_t rawTime_us;                    ///< value of time_us_64() at start of the IRQ handler for the last pulse IRQ edge when
                                           ///< the message was complete
   uint8_t len;                            ///< Number of raw decoded bytes that was decoded
   uint8_t bytes[MAX_RAW_MESSAGE_BYTES];   ///< Raw decoded bytes (may be truncated)
 
   bool isTruncated;                       ///< If this was an unknown message, and len > MAX_RAW_MESSAGE_BYTES
   float rssi;                             ///< RSSI associated with the message, as peak in last ~12ms after the preamble
-  uint32_t uniqueCount;                   ///< Ordered number of this message for the given type, added after deduplication
 
   // This union ensures that each slot in the ring buffer will be the same size and large enough to hold any type
   // Whether these hold data depends on the value of baseType
@@ -72,29 +71,39 @@ struct DecodedMessage_t {
     obj.len = len;
     obj.isTruncated = len > MAX_RAW_MESSAGE_BYTES;
     obj.rssi = -128.F;
-    obj.uniqueCount = 0;
     std::copy(bytes, bytes + std::min(len, (uint8_t)MAX_RAW_MESSAGE_BYTES), obj.bytes);
   }
 
-// Check if a message is one of a series of duplicate messages sent in a burst
-// Note, this will get confused in the unlikely event we get to contemporaneous bursts of
-// messages from different sensors. We could in theory fix this using a hashmap for recent
-// with a key of the basetype... but for the common case this gets the job done
-static bool isRecentDupe(const DecodedMessage_t& next, uint32_t interval_us) {
-  static auto recent = DecodedMessage_t::makeUndefined();
-  auto dt = next.rawTime_us - recent.rawTime_us;
-  bool dupe = false;
-  if (dt < interval_us && recent.baseType != DecodedMessage_t::BaseType_t::UNDEFINED) {
-    // prior message is within 0.5 second, probably duplicate.
-    // But a better check is also to compare the data, so do that to be sure
-    dupe = next.len == recent.len && std::equal(next.bytes, next.bytes + next.len, recent.bytes);
+  // Check if a message is one of a series of duplicate messages sent in a burst
+  // Note, this will get confused in the unlikely event we get to contemporaneous bursts of
+  // messages from different sensors. We could in theory fix this using a hashmap for recent
+  // with a key of the basetype... but for the common case this gets the job done
+  static bool isRecentDupe(const DecodedMessage_t& next, uint32_t interval_us) {
+    static auto recent = DecodedMessage_t::makeUndefined();
+    auto dt = next.rawTime_us - recent.rawTime_us;
+    bool dupe = false;
+    if (dt < interval_us && recent.baseType != DecodedMessage_t::BaseType_t::UNDEFINED) {
+      // prior message is within 0.5 second, probably duplicate.
+      // But a better check is also to compare the data, so do that to be sure
+      dupe = next.len == recent.len && std::equal(next.bytes, next.bytes + next.len, recent.bytes);
+    }
+    if (!dupe) {
+      recent = next;
+    }
+    return dupe;
   }
-  if (!dupe) {
-    recent = next;
-  }
-  return dupe;
-}
+};
 
+/// Extended message object with additional data added by Core0
+struct EnrichedMessage_t : DecodedMessage_t {
+  EnrichedMessage_t(const DecodedMessage_t& o, uint32_t count, uint32_t timestamp_ms) {
+    (DecodedMessage_t&)(*this) = o;
+    this->count = count;
+    this->timestamp_ms = timestamp_ms;
+  }
+
+  uint32_t count;             ///< Ordered number of this message for the given type, added after deduplication
+  uint32_t timestamp_ms;      ///< time in ms from boot to IRQ of edge of last pulse 
 };
 
 static_assert(std::is_standard_layout<DecodedMessage_t>::value);
