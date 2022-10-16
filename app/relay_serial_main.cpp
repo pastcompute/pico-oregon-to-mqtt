@@ -359,6 +359,10 @@ int main() {
     stdio_init_all();
     printf("\n\nCore0: Pico Oregon Serial Relay\n");
 
+  #if !NDEBUG
+    printf("\n\nCore0: DEBUG BUILD\n");
+  #endif
+
     RFM69Radio radio;
     radio.setPins(RFM69_MISO, RFM69_MOSI, RFM69_SCK, RFM69_CS, RFM69_IRQ, RFM69_RST);
     radio.setChipRate(RFM_OOK_CHIPRATE);

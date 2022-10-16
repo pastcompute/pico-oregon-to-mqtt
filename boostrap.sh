@@ -5,6 +5,5 @@ fi
 
 mkdir -p lib
 
-mkdir -p build
-cd build
-cmake ..
+( mkdir -p build ; cd build ; cmake -DCMAKE_BUILD_TYPE=Debug ..)
+( mkdir -p build.release ; cd build.release ; cmake -DCMAKE_BUILD_TYPE=Release .. )

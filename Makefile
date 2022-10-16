@@ -1,11 +1,19 @@
+# Debug by default...
 all:;
 	$(MAKE) -C build -j
+
+release:;
+	$(MAKE) -C build.release -j
 
 # The flash.* targets allow flashing using the Pico SWD instead of having to press the button and re-plug the USB
 
 relay_serial: build/app/relay_serial.elf
 
-flash/relay_serial: build/app/relay_serial.elf
+flash/relay_serial/release: build.release/app/relay_serial.elf
+	openocd -f interface/raspberrypi-swd.cfg -f target/rp2040.cfg -c "program $(<) verify exit"
+	$(MAKE) reset
+
+flash/relay_serial/debug: build/app/relay_serial.elf
 	openocd -f interface/raspberrypi-swd.cfg -f target/rp2040.cfg -c "program $(<) verify exit"
 	$(MAKE) reset
 
