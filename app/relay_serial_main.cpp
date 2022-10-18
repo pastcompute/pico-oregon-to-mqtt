@@ -285,42 +285,25 @@ void displaySpectrographBar(float energy, float background, uint32_t t0) {
 }
 
 // Condition variables for the timers to signal the core0 main loop
-static critical_section_t rssiPoll_crit;
-static volatile int rssiPoll_cv = 0;
+
+ConditionVariable rssiPoll;
+ConditionVariable spectPoll;
+ConditionVariable statusPoll;
 
 extern "C" bool rssiPollCallback(struct repeating_timer*) {
   // Reminder, this is called in the timer IRQ handler context
   // signal the main thread
-  critical_section_enter_blocking(&rssiPoll_crit);
-  rssiPoll_cv++;
-  critical_section_exit(&rssiPoll_crit);
-  __sev();
+  rssiPoll.notify();
   return true;
 }
-
-static critical_section_t spectPoll_crit;
-static volatile int spectPoll_cv = 0;
 
 extern "C" bool spectrographPollCallback(struct repeating_timer*) {
-  // signal the main thread
-  critical_section_enter_blocking(&spectPoll_crit);
-  spectPoll_cv++;
-  critical_section_exit(&spectPoll_crit);
-  __sev();
+  spectPoll.notify();
   return true;
 }
 
-// TODO - make a common class for this...
-// TODO - use the user data to have one callback with different poll cvs
-static critical_section_t statusPoll_crit;
-static volatile int statusPoll_cv = 0;
-
 extern "C" bool statusPollCallback(struct repeating_timer*) {
-  // signal the main thread
-  critical_section_enter_blocking(&statusPoll_crit);
-  statusPoll_cv++;
-  critical_section_exit(&statusPoll_crit);
-  __sev();
+  statusPoll.notify();
   return true;
 }
 
@@ -339,15 +322,12 @@ void core0_main(RFM69Radio& radio) {
 
   // Setup repeating alarms for polling RSSI and computing spectrograph integration, with critical sections
   // TODO: should this be in a different timer pool from the less critical timers?
-  critical_section_init(&rssiPoll_crit);
   struct repeating_timer rssiTimer;
   add_repeating_timer_us(rssiPoll_us, &rssiPollCallback, NULL, &rssiTimer);
 
-  critical_section_init(&spectPoll_crit);
   struct repeating_timer spectTimer;
   add_repeating_timer_us(spectrographIntegation_us, &spectrographPollCallback, NULL, &spectTimer);
 
-  critical_section_init(&statusPoll_crit);
   struct repeating_timer statusTimer;
   add_repeating_timer_ms(statusInterval_ms, &statusPollCallback, NULL, &statusTimer);
 
@@ -362,24 +342,10 @@ void core0_main(RFM69Radio& radio) {
     core0now = get_absolute_time();
     auto tSinceBoot = to_ms_since_boot(core0now);
 
-    bool pollRssi = false;
-    critical_section_enter_blocking(&rssiPoll_crit);
-    pollRssi = rssiPoll_cv > 0;
-    rssiPoll_cv = 0;
-    critical_section_exit(&rssiPoll_crit);
-
-    bool pollSpect = false;
-    critical_section_enter_blocking(&spectPoll_crit);
-    pollSpect = spectPoll_cv > 0;
-    spectPoll_cv = 0;
-    critical_section_exit(&spectPoll_crit);
-
-    bool pollStatus = false;
-    critical_section_enter_blocking(&statusPoll_crit);
-    pollStatus = statusPoll_cv > 0;
-    statusPoll_cv = 0;
-    critical_section_exit(&statusPoll_crit);
-
+    bool pollRssi = rssiPoll.poll();
+    bool pollSpect = spectPoll.poll();
+    bool pollStatus = statusPoll.poll();
+  
     auto tail = decodedMessagesRingBuffer.peek();
     if (tail) {
       decodedMessagesRingBuffer.pop(); // release a slot ASAP

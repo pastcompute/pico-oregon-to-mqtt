@@ -43,4 +43,27 @@ inline std::string bytesToHex(const uint8_t* data, uint8_t len) {
   return std::string(hexdump);
 }
 
+
+class ConditionVariable {
+  critical_section_t crit_;
+  volatile int count_;
+public:
+  void notify(bool sev = true) {
+    critical_section_enter_blocking(&crit_);
+    count_++;
+    critical_section_exit(&crit_);
+    if (sev) { __sev(); }
+  }
+
+  // Call typically after __wfe()
+  bool poll() {
+    bool signalled = false;
+    critical_section_enter_blocking(&crit_);
+    signalled = count_ > 0;
+    count_ = 0;
+    critical_section_exit(&crit_);
+    return signalled;
+  }
+};
+
 #endif
