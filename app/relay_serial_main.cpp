@@ -20,6 +20,8 @@
 #include <pico/multicore.h>
 #include <hardware/spi.h>
 #include <hardware/gpio.h>
+#include <hardware/watchdog.h>
+#include <hardware/adc.h>
 #include <pico/util/queue.h>
 #include <algorithm>
 
@@ -38,7 +40,7 @@ const uint LED_PIN = PICO_DEFAULT_LED_PIN;
 static bool debugMessageHex = false;
 
 /// Set this to true to output a spectograph of RSSI detections on Core0
-static bool debugSpectrograph = true;
+static bool debugSpectrograph = false;
 
 /// Set this to true to suppress decoder output and instead stream continuous spectrograph
 static bool continuousSpectrograph = false;
@@ -79,15 +81,17 @@ const int rssiFifoQueueLength = 16000 / rssiPoll_us;
 /// Recent RSSI queue elements to keep at least this many of
 const int rssiFifoQueueWatermark = 10000 / rssiPoll_us;
 
+const int statusInterval_ms = ONE_SECOND_US / 1000 * 5;
+
 /// RSSI spectrograph integration interval
-auto spectrographIntegation_us = ONE_SECOND_US / 4;
+const int spectrographIntegation_us = ONE_SECOND_US / 4;
 struct TimestampedRssi_t {
   uint32_t t;
   uint8_t rssiByte;
 };
 
 // Flash LED for approx 0.5 seconds each new message. If it sticks on we had a hang in somewhere after posting
-const auto messageLedMinTime_us = ONE_SECOND_US / 2;
+const auto messageLedMinTime_ms = ONE_SECOND_US / 4 / 1000;
 
 /// This critical section protects data shared between the dio2 interrupt handler and the second core main loop.
 static critical_section_t dio2_crit;
@@ -97,6 +101,12 @@ static Dio2SharedData_t sharedData;
 
 /// Common time on entry to core0 main loop
 static absolute_time_t core0now;
+
+inline void flashLed(uint32_t ms = 250) {
+  gpio_put(LED_PIN, 1);
+  sleep_ms(ms);
+  gpio_put(LED_PIN, 0);
+}
 
 /// RFM69 SX1231 dio2 Interrupt handler
 extern "C" void dio2InterruptHandler() {
@@ -120,7 +130,6 @@ extern "C" void dio2InterruptHandler() {
   critical_section_exit(&dio2_crit);
   prevTime_us = now;
 }
-
 /// Entry point for second core.
 static void core1_main() {
   printf("Core1: OOK Demodulator\n");
@@ -190,10 +199,12 @@ static void core1_main() {
         // Should we sanity check the timestamps, if they are too far out, then ignore?
       }
       if (msg) { msg->rssi = rssiBytePeak / -2.F; }
-      // Make the completed message available for other core
-      decodedMessagesRingBuffer.advance();
       // Turn LED on, other core will turn it off 250ms after it processes it
       gpio_put(LED_PIN, 1);
+      // Make the completed message available for other core
+      decodedMessagesRingBuffer.advance();
+      // Interrupt the other core
+      __sev();
       msg = NULL;
     } else {
       // this will stay true until the message is reset... which wont be long if this was not actually a valid preamble
@@ -214,23 +225,31 @@ static void core1_main() {
   }
 }
 
+static float readInternalTemperature() {
+  const float conversion_factor = 3.3f / (1 << 12);
+  const float result = adc_read() * conversion_factor;
+  return 27.0F - (result - 0.706F) / 0.001721F;  // Formular from the Pico  C/C++ SDK  Manual
+}
+
 /// Output a message in psuedo-CSV format on serial port (to host)
 void displayMessage(const EnrichedMessage_t& msg) {
+  float tempC = readInternalTemperature();
+
   switch(msg.baseType) {
     case EnrichedMessage_t::BaseType_t::OREGON:
-      printf("Oregon,%d,%04x,%d,%x,%.1f,%d,%s,%.1f,%d\n", msg.timestamp_ms,
+      printf("Oregon,%d,%.1f,%04x,%d,%x,%.1f,%d,%s,%.1f,%d\n", msg.timestamp_ms, tempC,
           msg.oregon.actualType, msg.oregon.channel, msg.oregon.rollingCode, msg.oregon.temp / 10.F, msg.oregon.hum,
           msg.oregon.battOK?"ok":"flat", msg.rssi, msg.count);
       break;
 
     case EnrichedMessage_t::BaseType_t::LACROSSE:
-      printf("Lacrosse,%d,%d,%.1f,%s,%.1f,%d\n", msg.timestamp_ms,
+      printf("Lacrosse,%d,%.1f,%d,%.1f,%s,%.1f,%d\n", msg.timestamp_ms, tempC,
         msg.lacrosse.id, msg.lacrosse.channel, (msg.lacrosse.temp - 500.F) / 10.F,
         msg.lacrosse.battOK?"ok":"flat", msg.rssi, msg.count);
       break;
 
     case EnrichedMessage_t::BaseType_t::UNDECODED:
-      printf("%d,UNK,%s,%.1f\n", msg.timestamp_ms, bytesToHex(msg.bytes, msg.len).c_str(), msg.rssi);
+      printf("%d,%.1f,UNK,%s,%.1f\n", msg.timestamp_ms, tempC, bytesToHex(msg.bytes, msg.len).c_str(), msg.rssi);
       break;
 
     default:
@@ -265,42 +284,111 @@ void displaySpectrographBar(float energy, float background, uint32_t t0) {
     for (int i=0; i < nx; i++) { printf("*"); } printf("\n");
 }
 
+// Condition variables for the timers to signal the core0 main loop
+static critical_section_t rssiPoll_crit;
+static volatile int rssiPoll_cv = 0;
+
+extern "C" bool rssiPollCallback(struct repeating_timer*) {
+  // Reminder, this is called in the timer IRQ handler context
+  // signal the main thread
+  critical_section_enter_blocking(&rssiPoll_crit);
+  rssiPoll_cv++;
+  critical_section_exit(&rssiPoll_crit);
+  __sev();
+  return true;
+}
+
+static critical_section_t spectPoll_crit;
+static volatile int spectPoll_cv = 0;
+
+extern "C" bool spectrographPollCallback(struct repeating_timer*) {
+  // signal the main thread
+  critical_section_enter_blocking(&spectPoll_crit);
+  spectPoll_cv++;
+  critical_section_exit(&spectPoll_crit);
+  __sev();
+  return true;
+}
+
+// TODO - make a common class for this...
+// TODO - use the user data to have one callback with different poll cvs
+static critical_section_t statusPoll_crit;
+static volatile int statusPoll_cv = 0;
+
+extern "C" bool statusPollCallback(struct repeating_timer*) {
+  // signal the main thread
+  critical_section_enter_blocking(&statusPoll_crit);
+  statusPoll_cv++;
+  critical_section_exit(&statusPoll_crit);
+  __sev();
+  return true;
+}
+
+extern "C" int64_t turnLedOffCallback(alarm_id_t id, void *user_data) {
+  gpio_put(LED_PIN, 0);
+  return 0;
+}
+
 // On Core0, loop and measure RSSI and run the decoder when there is a new pulse
 void core0_main(RFM69Radio& radio) {
   core0now = get_absolute_time();
-  absolute_time_t tNextSpectrograph = delayed_by_us(core0now, spectrographIntegation_us);
-  absolute_time_t tNextPoll = delayed_by_us(core0now, rssiPoll_us);
-  absolute_time_t tNextLEDCheck = delayed_by_us(core0now, messageLedMinTime_us);
 
   Spectrograph spectrograph;
   TimestampedRssi_t rssi = { 0, 0 };
   bool latchRssiQueueFull = false;
-  bool needToTurnOffLed = true;
+
+  // Setup repeating alarms for polling RSSI and computing spectrograph integration, with critical sections
+  // TODO: should this be in a different timer pool from the less critical timers?
+  critical_section_init(&rssiPoll_crit);
+  struct repeating_timer rssiTimer;
+  add_repeating_timer_us(rssiPoll_us, &rssiPollCallback, NULL, &rssiTimer);
+
+  critical_section_init(&spectPoll_crit);
+  struct repeating_timer spectTimer;
+  add_repeating_timer_us(spectrographIntegation_us, &spectrographPollCallback, NULL, &spectTimer);
+
+  critical_section_init(&statusPoll_crit);
+  struct repeating_timer statusTimer;
+  add_repeating_timer_ms(statusInterval_ms, &statusPollCallback, NULL, &statusTimer);
+
+  watchdog_enable(1000, true);
+
   while (true) {
 
-    // This core is not so power efficient, we have to continually poll the timer and the ring buffer
-    // A slightly more efficient design would have core1 signal core0 to wake up and check the ring buffer
-    // but we would need to also integrate that with alarms
+    // idle (in theory, use less energy) until either Core1 signals us (should be data in the ring buffer)
+    // or until a timer signals us
+    __wfe();
 
     core0now = get_absolute_time();
     auto tSinceBoot = to_ms_since_boot(core0now);
+
+    bool pollRssi = false;
+    critical_section_enter_blocking(&rssiPoll_crit);
+    pollRssi = rssiPoll_cv > 0;
+    rssiPoll_cv = 0;
+    critical_section_exit(&rssiPoll_crit);
+
+    bool pollSpect = false;
+    critical_section_enter_blocking(&spectPoll_crit);
+    pollSpect = spectPoll_cv > 0;
+    spectPoll_cv = 0;
+    critical_section_exit(&spectPoll_crit);
+
+    bool pollStatus = false;
+    critical_section_enter_blocking(&statusPoll_crit);
+    pollStatus = statusPoll_cv > 0;
+    statusPoll_cv = 0;
+    critical_section_exit(&statusPoll_crit);
 
     auto tail = decodedMessagesRingBuffer.peek();
     if (tail) {
       decodedMessagesRingBuffer.pop(); // release a slot ASAP
       handleMessage(*tail);
       // if LED had been hopefully turned on, schedule to turn it off
-      tNextLEDCheck = delayed_by_us(core0now, messageLedMinTime_us);
-      // this is hacky we should use an alarm instead
-      needToTurnOffLed = true;
-    }
-    if (needToTurnOffLed && time_reached(tNextLEDCheck)) {
-      gpio_put(LED_PIN, 0);
-      needToTurnOffLed = false;
+      add_alarm_in_ms(messageLedMinTime_ms, &turnLedOffCallback, NULL, false);
     }
 
-    if (time_reached(tNextPoll)) {
-      tNextPoll = delayed_by_us(core0now, rssiPoll_us);
+    if (pollRssi) {
       rssi.rssiByte = radio.readRSSIByte();
       rssi.t = tSinceBoot;
       if (!queue_try_add(&rssiFifo, &rssi)) {
@@ -311,7 +399,7 @@ void core0_main(RFM69Radio& radio) {
       spectrograph.updateRssi(rssi.rssiByte);
     }
 
-    if (time_reached(tNextSpectrograph)) {
+    if (pollSpect) {
       // Capture the time the first time integrate() was called
       static auto t0 = tSinceBoot;
       spectrograph.integrate();
@@ -320,22 +408,33 @@ void core0_main(RFM69Radio& radio) {
       } else if (continuousSpectrograph) {
         displaySpectrographBar(spectrograph.getEnergy(), spectrograph.getBackground(), t0);
       }
-      tNextSpectrograph = delayed_by_us(core0now, spectrographIntegation_us);
     }
+
+    if (pollStatus) {
+      float tempC = readInternalTemperature();
+      float background = spectrograph.getBackground();
+      printf("STATUS,%d,%.1f,%.1f\n", tSinceBoot, tempC, background);
+    }
+
+    // We should get here at at least 1e6/rssiPoll_us, thus our watchdog period of 1s is ample
+    watchdog_update();
   }
 }
 
+// Init resources global to both cores, then start each core process
 int main() {
     // Turn LED on
     const uint LED_PIN = PICO_DEFAULT_LED_PIN;
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
-    gpio_put(LED_PIN, 1);
-    sleep_ms(250);
-    gpio_put(LED_PIN, 0);
+    flashLed();
 
     stdio_init_all();
     printf("\n\nCore0: Pico Oregon Serial Relay\n");
+
+    if (watchdog_caused_reboot()) {
+      printf("Rebooted by Watchdog!\n");
+    }
 
   #if !NDEBUG
     printf("\n\nCore0: DEBUG BUILD\n");
@@ -354,11 +453,7 @@ int main() {
     radio.enableReceiver();
     //radio.dumpRegisters();
 
-    // Turn LED on a second time, if we got to here
-    sleep_ms(250);
-    gpio_put(LED_PIN, 1);
-    sleep_ms(250);
-    gpio_put(LED_PIN, 0);
+    alarm_pool_init_default();
 
     // Push RSSI samples through to the other core
     // We want to cover at least 12-14 milliseconds of message data to find a peak in RSSI
@@ -367,6 +462,15 @@ int main() {
     // and then core1 will flush it back again and sample for the peak
     queue_init(&rssiFifo, sizeof(TimestampedRssi_t), rssiFifoQueueLength);
 
+    // prepare to read internal temp
+    adc_init();
+    adc_set_temp_sensor_enabled(true);
+    adc_select_input(4);
+
+    // Turn LED on a second time, if we got to here
+    sleep_ms(250);
+    flashLed();
+
     multicore_launch_core1(core1_main);
     core0_main(radio);
 }
@@ -374,5 +478,3 @@ int main() {
 // Notable observations:
 // THGN123N temp + humid every 39 seconds
 // Lacrosse TX141b every 67, 73 seconds - each freezer
-
-// TODO: use an alarm to turn of the LED, and for the RSSI
