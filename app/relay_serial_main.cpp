@@ -70,10 +70,10 @@ queue_t rssiFifo;
 // The larger this can be and still work, the less time is used in processing
 // although there could be a miss in the peak read from the sx1231
 
-/// RSSI polling interval
-const int rssiPoll_us = 100;
+/// RSSI polling interval. For some reason, the real return rate is 4us out; 196 --> 5kHz (every 200us read the RSSI)
+const int rssiPoll_us = 396;
 
-// The smaller these can be and still work, the shorter the time to flush
+// The smaller these can be and still work, the shorter the time to flush and less memory used
 
 /// Recent RSSI queue size
 const int rssiFifoQueueLength = 16000 / rssiPoll_us;
@@ -81,7 +81,7 @@ const int rssiFifoQueueLength = 16000 / rssiPoll_us;
 /// Recent RSSI queue elements to keep at least this many of
 const int rssiFifoQueueWatermark = 10000 / rssiPoll_us;
 
-const int statusInterval_ms = ONE_SECOND_US / 1000 * 5;
+const int statusInterval_ms = ONE_SECOND_MS * 5;
 
 /// RSSI spectrograph integration interval
 const int spectrographIntegation_us = ONE_SECOND_US / 4;
@@ -320,30 +320,37 @@ void core0_main(RFM69Radio& radio) {
   struct repeating_timer statusTimer;
   add_repeating_timer_ms(statusInterval_ms, &conditionSignalTimerCallback, &statusPoll_cv, &statusTimer);
 
-  watchdog_enable(1000, true);
-
+  watchdog_enable(ONE_SECOND_MS, true);
+  int popped = 0;
+  int polled1 = 0, polled2 = 0;
+  int wakeups = 0;
   while (true) {
 
     // idle (in theory, use less energy) until either Core1 signals us (should be data in the ring buffer)
     // or until a timer signals us
+    // Note that this idle is superfluous until we push the RSSI interval up somewhere beyond 200us
+    // There does seem to be a fraction of a degree in temperature drop too when we do that
     __wfe();
+    wakeups++;
 
     core0now = get_absolute_time();
     auto tSinceBoot = to_ms_since_boot(core0now);
 
-    bool pollRssi = rssiPoll_cv.poll();
-    bool pollSpect = spectPoll_cv.poll();
-    bool pollStatus = statusPoll_cv.poll();
-  
     auto tail = decodedMessagesRingBuffer.peek();
     if (tail) {
       decodedMessagesRingBuffer.pop(); // release a slot ASAP
+      popped++;
       handleMessage(*tail);
       // if LED had been hopefully turned on, schedule to turn it off
       add_alarm_in_ms(messageLedMinTime_ms, &turnLedOffCallback, NULL, false);
     }
 
+    bool pollRssi = rssiPoll_cv.poll();
     if (pollRssi) {
+      // approx slightly less than 9600x per second, almost as expected (why not more closer to 10000?)
+      // and it scales inverse linearly as we increase the interval... 200 --> 4900x
+      // as though the 100's us interval cops some latency reducing the effective rate
+      polled1++;
       rssi.rssiByte = radio.readRSSIByte();
       rssi.t = tSinceBoot;
       if (!queue_try_add(&rssiFifo, &rssi)) {
@@ -354,7 +361,10 @@ void core0_main(RFM69Radio& radio) {
       spectrograph.updateRssi(rssi.rssiByte);
     }
 
+    bool pollSpect = spectPoll_cv.poll();
     if (pollSpect) {
+      // appox 4x per second, as expected
+      polled2++;
       // Capture the time the first time integrate() was called
       static auto t0 = tSinceBoot;
       spectrograph.integrate();
@@ -365,10 +375,13 @@ void core0_main(RFM69Radio& radio) {
       }
     }
 
+    bool pollStatus = statusPoll_cv.poll();
     if (pollStatus) {
       float tempC = readInternalTemperature();
       float background = spectrograph.getBackground();
-      printf("STATUS,%d,%.1f,%.1f\n", tSinceBoot, tempC, background);
+      printf("STATUS,%d,%.1f,%.1f,%d,%d,%d,%d\n", tSinceBoot, tempC, background, popped, polled1, polled2, wakeups);
+      wakeups = 0;
+      polled1 = polled2 = 0;
     }
 
     // We should get here at at least 1e6/rssiPoll_us, thus our watchdog period of 1s is ample
