@@ -289,9 +289,6 @@ void core0_main(RFM69Radio& radio) {
     if (tail) {
       decodedMessagesRingBuffer.pop(); // release a slot ASAP
       handleMessage(*tail);
-      // if (!continuousSpectrograph) {
-      //   outuptDecoder(*tail);
-      // }
       // if LED had been hopefully turned on, schedule to turn it off
       tNextLEDCheck = delayed_by_us(core0now, messageLedMinTime_us);
       // this is hacky we should use an alarm instead
@@ -376,4 +373,6 @@ int main() {
 
 // Notable observations:
 // THGN123N temp + humid every 39 seconds
-// Something not a V2 or V3, every 67 seconds (on the RTL-SDR) and 73 (here) - my freezer?
+// Lacrosse TX141b every 67, 73 seconds - each freezer
+
+// TODO: use an alarm to turn of the LED, and for the RSSI
