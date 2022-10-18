@@ -286,24 +286,13 @@ void displaySpectrographBar(float energy, float background, uint32_t t0) {
 
 // Condition variables for the timers to signal the core0 main loop
 
-ConditionVariable rssiPoll;
-ConditionVariable spectPoll;
-ConditionVariable statusPoll;
+ConditionVariable rssiPoll_cv;
+ConditionVariable spectPoll_cv;
+ConditionVariable statusPoll_cv;
 
-extern "C" bool rssiPollCallback(struct repeating_timer*) {
-  // Reminder, this is called in the timer IRQ handler context
-  // signal the main thread
-  rssiPoll.notify();
-  return true;
-}
-
-extern "C" bool spectrographPollCallback(struct repeating_timer*) {
-  spectPoll.notify();
-  return true;
-}
-
-extern "C" bool statusPollCallback(struct repeating_timer*) {
-  statusPoll.notify();
+extern "C" bool conditionSignalTimerCallback(struct repeating_timer* timer) {
+  assert(timer && timer->user_data);
+  ((ConditionVariable*)timer->user_data)->notify();
   return true;
 }
 
@@ -323,13 +312,13 @@ void core0_main(RFM69Radio& radio) {
   // Setup repeating alarms for polling RSSI and computing spectrograph integration, with critical sections
   // TODO: should this be in a different timer pool from the less critical timers?
   struct repeating_timer rssiTimer;
-  add_repeating_timer_us(rssiPoll_us, &rssiPollCallback, NULL, &rssiTimer);
+  add_repeating_timer_us(rssiPoll_us, &conditionSignalTimerCallback, &rssiPoll_cv, &rssiTimer);
 
   struct repeating_timer spectTimer;
-  add_repeating_timer_us(spectrographIntegation_us, &spectrographPollCallback, NULL, &spectTimer);
+  add_repeating_timer_us(spectrographIntegation_us, &conditionSignalTimerCallback, &spectPoll_cv, &spectTimer);
 
   struct repeating_timer statusTimer;
-  add_repeating_timer_ms(statusInterval_ms, &statusPollCallback, NULL, &statusTimer);
+  add_repeating_timer_ms(statusInterval_ms, &conditionSignalTimerCallback, &statusPoll_cv, &statusTimer);
 
   watchdog_enable(1000, true);
 
@@ -342,9 +331,9 @@ void core0_main(RFM69Radio& radio) {
     core0now = get_absolute_time();
     auto tSinceBoot = to_ms_since_boot(core0now);
 
-    bool pollRssi = rssiPoll.poll();
-    bool pollSpect = spectPoll.poll();
-    bool pollStatus = statusPoll.poll();
+    bool pollRssi = rssiPoll_cv.poll();
+    bool pollSpect = spectPoll_cv.poll();
+    bool pollStatus = statusPoll_cv.poll();
   
     auto tail = decodedMessagesRingBuffer.peek();
     if (tail) {
