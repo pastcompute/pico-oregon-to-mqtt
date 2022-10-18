@@ -81,7 +81,11 @@ const int rssiFifoQueueLength = 16000 / rssiPoll_us;
 /// Recent RSSI queue elements to keep at least this many of
 const int rssiFifoQueueWatermark = 10000 / rssiPoll_us;
 
-const int statusInterval_ms = ONE_SECOND_MS * 5;
+const int statusInterval_ms = ONE_SECOND_MS * 15;
+
+// On quarter second cadence, see if there is any keyboard input on the serial port
+// If the magic sequence happens we stop sending output and switch to a control mode
+const int keyboardInterval_ms = ONE_SECOND_MS / 4;
 
 /// RSSI spectrograph integration interval
 const int spectrographIntegation_us = ONE_SECOND_US / 4;
@@ -289,6 +293,7 @@ void displaySpectrographBar(float energy, float background, uint32_t t0) {
 ConditionVariable rssiPoll_cv;
 ConditionVariable spectPoll_cv;
 ConditionVariable statusPoll_cv;
+ConditionVariable keyboardPoll_cv;
 
 extern "C" bool conditionSignalTimerCallback(struct repeating_timer* timer) {
   assert(timer && timer->user_data);
@@ -320,10 +325,14 @@ void core0_main(RFM69Radio& radio) {
   struct repeating_timer statusTimer;
   add_repeating_timer_ms(statusInterval_ms, &conditionSignalTimerCallback, &statusPoll_cv, &statusTimer);
 
+  struct repeating_timer keyboardTimer;
+  add_repeating_timer_ms(keyboardInterval_ms, &conditionSignalTimerCallback, &keyboardPoll_cv, &keyboardTimer);
+
   watchdog_enable(ONE_SECOND_MS, true);
   int popped = 0;
-  int polled1 = 0, polled2 = 0;
+  int polled1 = 0;
   int wakeups = 0;
+  int mode = 0;
   while (true) {
 
     // idle (in theory, use less energy) until either Core1 signals us (should be data in the ring buffer)
@@ -340,7 +349,10 @@ void core0_main(RFM69Radio& radio) {
     if (tail) {
       decodedMessagesRingBuffer.pop(); // release a slot ASAP
       popped++;
-      handleMessage(*tail);
+
+      if (mode == 0) {
+        handleMessage(*tail);
+      } // in command mode, keep popping messages, but dont output them
       // if LED had been hopefully turned on, schedule to turn it off
       add_alarm_in_ms(messageLedMinTime_ms, &turnLedOffCallback, NULL, false);
     }
@@ -363,15 +375,15 @@ void core0_main(RFM69Radio& radio) {
 
     bool pollSpect = spectPoll_cv.poll();
     if (pollSpect) {
-      // appox 4x per second, as expected
-      polled2++;
       // Capture the time the first time integrate() was called
       static auto t0 = tSinceBoot;
       spectrograph.integrate();
-      if (debugSpectrograph && !continuousSpectrograph && spectrograph.getDetection()) {
-        displaySpectrographBar(spectrograph.getEnergy(), spectrograph.getBackground(), t0);
-      } else if (continuousSpectrograph) {
-        displaySpectrographBar(spectrograph.getEnergy(), spectrograph.getBackground(), t0);
+      if (mode == 0) {
+        if (debugSpectrograph && !continuousSpectrograph && spectrograph.getDetection()) {
+          displaySpectrographBar(spectrograph.getEnergy(), spectrograph.getBackground(), t0);
+        } else if (continuousSpectrograph) {
+          displaySpectrographBar(spectrograph.getEnergy(), spectrograph.getBackground(), t0);
+        }
       }
     }
 
@@ -379,9 +391,31 @@ void core0_main(RFM69Radio& radio) {
     if (pollStatus) {
       float tempC = readInternalTemperature();
       float background = spectrograph.getBackground();
-      printf("STATUS,%d,%.1f,%.1f,%d,%d,%d,%d\n", tSinceBoot, tempC, background, popped, polled1, polled2, wakeups);
+      auto rate = (statusInterval_ms / ONE_SECOND_MS);
+      printf("STATUS,%d,%.1f,%.1f,%d,%d,%d\n", tSinceBoot, tempC, background, popped, polled1 / rate, wakeups / rate);
       wakeups = 0;
-      polled1 = polled2 = 0;
+      polled1 = 0;
+    }
+
+    // Dodgy REPL. Need to move this to another file or function
+    bool pollKeyboard = keyboardPoll_cv.poll();
+    if (pollKeyboard) {
+      int c = getchar_timeout_us(0);
+      switch (c) {
+        case 13:
+        case 'h':
+          // ENTER was pressed...
+          printf("\n");
+          printf("h)   Help\n");
+          printf("r)   Reset Counters\n");
+          break;
+        case 'r':
+          popped = 0;
+          statusPoll_cv.notify();
+          break;
+      }
+      // swallow other characters
+      while(getchar_timeout_us(0) != PICO_ERROR_TIMEOUT);
     }
 
     // We should get here at at least 1e6/rssiPoll_us, thus our watchdog period of 1s is ample
