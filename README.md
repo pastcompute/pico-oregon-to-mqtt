@@ -75,6 +75,55 @@ The Python code still needs improvements:
 - pull in the password, user, IP, expected idenitfiers from configuration
 - a systemd script (at the moment I start a screen session after a power outage and run it there)
 
+Configuration snippet for Homebridge:
+```
+        {
+            "accessory": "mqttthing",
+            "type": "temperatureSensor",
+            "name": "BackVerandahT",
+            "url": "mqtt://REDACTED",
+            "username": "REDACTED",
+            "password": "REDACTED",
+            "caption": "Back Verandah Temp",
+            "topics": {
+                "getCurrentTemperature": "rtl_433/unifi2/devices/Oregon-THGR122N/1/111/temperature_C",
+                "minTemperature": -20,
+                "maxTemperature": -60
+            }
+        },
+        {
+            "accessory": "mqttthing",
+            "type": "humiditySensor",
+            "name": "BackVerandahH",
+            "caption": "Back Verandah Humidity",
+            "topics": {
+                "getCurrentRelativeHumidity": "rtl_433/unifi2/devices/Oregon-THGR122N/1/111/humidity"
+            }
+        },
+        {
+            "accessory": "mqttthing",
+            "type": "temperatureSensor",
+            "name": "DeepFreeze",
+            "caption": "Deep Freeze",
+            "topics": {
+                "getCurrentTemperature": "rtl_433/unifi2/devices/LaCrosse-TX141Bv2/2/182/temperature_C",
+                "minTemperature": -23,
+                "maxTemperature": -15
+            }
+        },
+        {
+            "accessory": "mqttthing",
+            "type": "temperatureSensor",
+            "name": "Freezer",
+            "caption": "Freezer",
+            "topics": {
+                "getCurrentTemperature": "rtl_433/unifi2/devices/LaCrosse-TX141Bv2/1/143/temperature_C",
+                "minTemperature": -21,
+                "maxTemperature": -12
+            }
+        },
+```
+
 # System 
 
 This system uses just a Raspberry Pico or Pico-Wireless, and an RFM69 433MHz module.
