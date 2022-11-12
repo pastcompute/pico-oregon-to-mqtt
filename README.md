@@ -9,6 +9,7 @@ Briefly, a Raspberry Pi Pico uses an RFM69 to decode and parse OOK and then writ
 
 In my case, this is the following architecture:
 
+```
        x 433MHz RF
        x
    xxxx xxxx
@@ -37,6 +38,7 @@ In my case, this is the following architecture:
                                                           |
                                                           v
                                                      Apple Homekit
+```
 
 # System 
 
