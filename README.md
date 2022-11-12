@@ -3,6 +3,43 @@
 This project describes another approach to building a relay for 433MHz Oregon weather sensors,
 allowing easy integration into your home automation system.
 
+Briefly, a Raspberry Pi Pico uses an RFM69 to decode and parse OOK and then write this on its serial port (or USB as serial) as CSV.  Any computer (a Raspberry Pi, Nuc or whatever) can then take this and with a small python program convert it to MQTT that can be ingested into a home automation system.
+
+# Architecture
+
+In my case, this is the following architecture:
+
+       x 433MHz RF
+       x
+   xxxx xxxx
+      x|x
+    xxx|xxx
+       |Discone antenna
+       |
++------+--------+
+|               |
+|               |
+|  RFM 69       |
+|               |
+|               |                                   Home Web / App
++-------+-------+                                         ^
+        |SPI                                              |
+        |                                                 |
++-------v-------+        +---------------+         +------+--------+
+|               |        |               |         |      |        |
+|               |        |  Raspberry Pi |         |      |        |
+|Raspberry Pico | Serial |               |  +------+-->OpenHAB     |
+|               +-------->  Raspbian     |  |      |               |
+|               |        |  Mosquitto    |  +------+->HomeBridge   |
+|               |        |               |  |      |      |        |
+|               |        |MQTT Conversion+--+      |      |        |
++---------------+        +---------------+         +------+--------+
+                                                          |
+                                                          v
+                                                     Apple Homekit
+
+# System 
+
 This system uses just a Raspberry Pico or Pico-Wireless, and an RFM69 433MHz module.
 
 With the Pico, data is output on the USB serial port allowing the Pico to be connected to another computer such as a Raspberry Pi to provide the MQTT network client. It could be directly connected to a machine already running OpenHAB or Homebridge, etc.
