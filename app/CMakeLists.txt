@@ -11,7 +11,7 @@ target_link_libraries(
         )
 
         
-pico_enable_stdio_usb(relay_serial 0)
+pico_enable_stdio_usb(relay_serial 1)
 pico_enable_stdio_uart(relay_serial 1)
 
 pico_add_extra_outputs(relay_serial)
