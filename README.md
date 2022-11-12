@@ -40,6 +40,9 @@ In my case, this is the following architecture:
                                                      Apple Homekit
 ```
 
+The MQTT messages I output, conform to the output of the rtl_433 program, which I was using previously for this task.
+This meant I did not need to immediately modify the configuration of my OpenHAB and homebridge instances.
+
 # System 
 
 This system uses just a Raspberry Pico or Pico-Wireless, and an RFM69 433MHz module.
