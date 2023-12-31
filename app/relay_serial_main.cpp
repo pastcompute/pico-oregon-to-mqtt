@@ -409,6 +409,10 @@ void core0_main(RFM69Radio& radio) {
           printf("h)   Help\n");
           printf("r)   Reset Counters\n");
           break;
+        case 's':
+          debugSpectrograph = !debugSpectrograph;
+          printf("Debug spectrograph enabled: %s\n", debugSpectrograph ? "yes": "no");
+          break;
         case 'r':
           popped = 0;
           statusPoll_cv.notify();
