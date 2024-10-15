@@ -1,0 +1,14 @@
+[Unit]
+Description=Pico rtl_433 to MQTT publisher
+After=network.target
+After=pico433_serial_mqtt.timer
+[Service]
+ExecStart=python3 serial_to_mqtt.py
+Restart=always
+RestartSec=5
+WorkingDirectory=/root
+StandardOutput=append:/tmp/pico433_serial_mqtt.log
+StandardError=append:/tmp/pico433_serial_mqtt.errors.log
+[Install]
+WantedBy=multi-user.target
+
