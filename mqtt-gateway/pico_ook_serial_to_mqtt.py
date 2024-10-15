@@ -21,7 +21,21 @@ MOSQUITTO_PASS = "PASSWORD"
 # STATUS,285782,24.3,-88.8,153,2483,10675
 # Oregon,285908,24.3,1d20,1,27,19.9,45,ok,-63.0,6
 
-ser = serial.Serial(SERIAL_PORT, 115200, parity=serial.PARITY_NONE, stopbits=1, rtscts=0, xonxoff=0, timeout=None)
+ser = None
+port = 0
+while True:
+    try:
+        serial_port = "{}{}".format(SERIAL_PORT_BASE, port)
+        ser = serial.Serial(serial_port, 115200, parity=serial.PARITY_NONE, stopbits=1, rtscts=0, xonxoff=0, timeout=None)
+        break
+    except serial.serialutil.SerialException as es:
+        print(es)
+        print("Try next port in 5 seconds")
+        time.sleep(5)
+        port = port + 1
+        if (port > 3): port = 0
+
+
 ser.flushInput()
 
 pat = re.compile(" ")
@@ -87,13 +101,13 @@ while True:
         s = bytes.decode("utf-8").rstrip().lstrip()
         reader = csv.reader([s])
         for row in reader:
-            if row[0] == "STATUS":
+            if len(row) > 0 and row[0] == "STATUS":
                 print(s)
                 uptime = row[2]
                 internalTempC = row[3]
                 backgroundRssi = row[4]
                 break
-            if row[0] == "Lacrosse":
+            if len(row) > 0 and row[0] == "Lacrosse":
                 print(s)
                 uptime = row[1]
                 internalTempC = row[2]
@@ -104,7 +118,7 @@ while True:
                 count = row[7]
                 pubLacrosse(uptime, id, internalTempC, sensorTempC, batteryOk, rssi, count)
                 break
-            if row[0] == "Oregon":
+            if len(row) > 0 and row[0] == "Oregon":
                 print(s)
                 id = 111
                 uptime = row[1]
@@ -121,5 +135,11 @@ while True:
     except KeyboardInterrupt as e:
         break
     except Exception as e2:
+        ex = sys.exc_info()[0]
+        print(ex)
         print(e2)
+        time.sleep(5)
+        if re.match(e2.strerror, "device disconnected"):
+            # port changed, let systemd restart us
+            break
         continue
