@@ -103,10 +103,14 @@ def pubLacrosse(uptime, id, internalC, sensorC, battery, rssi, count):
     RTL_FAKE_DEVICE = "LaCrosse-TX141Bv2"
     # Hack: not parsing channel properly as yet
     channel = 1
+    global tLastFreezer
+    global tLastFridge
     if int(id) == 182:
+        print("deepfreeze")
         channel = 2
         tLastFreezer = time.time()
     elif int(id) == 143:
+        print("fridgefreezer")
         tLastFridge = time.time()
 
     # 182 == Deep Freeze, 143 == Fridge Freezer
@@ -157,19 +161,19 @@ while True:
 
         # if no \n at the end then we timed out
         # A bit dodgy, we loose some data if this happens mid message
-        # The timeout is very long, we only need it to detect if the freezer has stopped sending updates
+        # The timeout is very long, we only need it to detect if the freezer has stopped sending updates and there have also been no other messages
         bbb = bytes[-1]
         if bbb != 10:
           print("timeout @ {}".format(t1))
 
-        if t1 > tLastFreezer + DEAD_SECONDS:
-          print("No deep-freezer message for more than {} seconds".format(t1 - tLastFreezer))
+        if tLastFreezer < t1 - DEAD_SECONDS:
+          print("No deep-freezer message for more than {} seconds".format(t1 - tLastFreezer), tLastFreezer)
           # dont annoy people! if battery went flat we get a double short beep every 15 minutes
           if tLastWarn1 < t1 - 1800:
             bips(2,0.1,0.15)
             tLastWarn1 = t1
-        if t1 > tLastFridge + DEAD_SECONDS:
-          print("No fridge-freezer message for more than {} minutes".format(t1 - tLastFridge))
+        if tLastFridge < t1 - DEAD_SECONDS:
+          print("No fridge-freezer message for more than {} seconds".format(t1 - tLastFridge), tLastFridge)
           if tLastWarn2 < t1 - 1800:
             bips(3,0.1,0.15)
             tLastWarn2 = t1
@@ -181,13 +185,13 @@ while True:
         reader = csv.reader([s])
         for row in reader:
             if len(row) > 0 and row[0] == "STATUS":
-                print(s)
+                print(t1, s)
                 uptime = row[2]
                 internalTempC = row[3]
                 backgroundRssi = row[4]
                 break
             if len(row) > 0 and row[0] == "Lacrosse":
-                print(s)
+                print(t1, s)
                 uptime = row[1]
                 internalTempC = row[2]
                 id = row[3]
@@ -198,7 +202,7 @@ while True:
                 pubLacrosse(uptime, id, internalTempC, sensorTempC, batteryOk, rssi, count)
                 break
             if len(row) > 0 and row[0] == "Oregon":
-                print(s)
+                print(t1, s)
                 id = 111
                 uptime = row[1]
                 internalTempC = row[2]
