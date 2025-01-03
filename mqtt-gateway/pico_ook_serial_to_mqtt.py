@@ -50,8 +50,8 @@ SER_TIMEOUT=15*60
 # Complain about missing freezermessages if seen none for longer than this
 DEAD_SECONDS=333
 # Temperature thresholds
-FREEZER_WARM=-23
-FRIDGEFREEZ_WARN=-8
+FREEZER_WARM=-11
+FRIDGEFREEZ_WARN=-10
 
 print("Starting...")
 bips(2,0.1,0.05)
@@ -161,17 +161,20 @@ while True:
         bbb = bytes[-1]
         if bbb != 10:
           print("timeout @ {}".format(t1))
-          if t1 > tLastFreezer + DEAD_SECONDS:
-            print("No deep-freezer message for more than {} seconds".format(t1 - tLastFreezer))
-            # dont annoy people! if battery went flat we get a double short beep every 15 minutes
-            if tLastWarn1 < t1 - 1800:
-              bips(2,0.1,0.15)
-              tLastWarn1 = t1
-          if t1 > tLastFridge + DEAD_SECONDS:
-            print("No fridge-freezer message for more than {} minutes".format(t1 - tLastFridge))
-            if tLastWarn2 < t1 - 1800:
-              bips(3,0.1,0.15)
-              tLastWarn2 = t1
+
+        if t1 > tLastFreezer + DEAD_SECONDS:
+          print("No deep-freezer message for more than {} seconds".format(t1 - tLastFreezer))
+          # dont annoy people! if battery went flat we get a double short beep every 15 minutes
+          if tLastWarn1 < t1 - 1800:
+            bips(2,0.1,0.15)
+            tLastWarn1 = t1
+        if t1 > tLastFridge + DEAD_SECONDS:
+          print("No fridge-freezer message for more than {} minutes".format(t1 - tLastFridge))
+          if tLastWarn2 < t1 - 1800:
+            bips(3,0.1,0.15)
+            tLastWarn2 = t1
+
+        if bbb != 10:
           continue
 
         s = bytes.decode("utf-8").rstrip().lstrip()
