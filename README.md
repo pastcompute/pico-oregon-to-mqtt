@@ -140,4 +140,4 @@ For a 3D printed enclosure, see https://github.com/pastcompute/openscad-rpipico-
 
 How I made the antenna was inspired by this: https://community.element14.com/challenges-projects/project14/rf/b/blog/posts/building-a-poor-man-s-quarter-wave-433mhz-antenna-antenna-s-construction
 
-For decoding Oregon I modified an existing Arduino library, then extended it with support for the Lacrosse by inspecting the source code of RTL433 (files in [](app/decoder/) )
+For decoding Oregon I modified an existing Arduino library, then extended it with support for the Lacrosse by inspecting the source code of RTL433 (files in [./app/decoder/]() )
